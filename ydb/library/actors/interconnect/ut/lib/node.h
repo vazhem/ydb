@@ -11,6 +11,7 @@
 #include <ydb/library/actors/interconnect/interconnect_tcp_server.h>
 #include <ydb/library/actors/interconnect/interconnect_tcp_proxy.h>
 #include <ydb/library/actors/interconnect/interconnect_proxy_wrapper.h>
+#include <ydb/library/actors/interconnect/rdma/mem_pool.h>
 
 #include "tls/tls.h"
 
@@ -53,6 +54,7 @@ public:
         common->Settings.TCPSocketBufferSize = 2048 * 1024;
         common->Settings.SocketSendOptimization = sendOpt;
         common->OutgoingHandshakeInflightLimit = 3;
+        common->RdmaMemPool = NInterconnect::NRdma::CreateDummyMemPool();
 
         if (withTls) {
             common->Settings.Certificate = NInterconnect::GetCertificateForTest();
