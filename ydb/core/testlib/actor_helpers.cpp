@@ -2,7 +2,7 @@
 
 namespace NKikimr {
 
-TActorSystemStub::TActorSystemStub(TRcBufAllocator alloc)
+TActorSystemStub::TActorSystemStub(std::shared_ptr<IRcBufAllocator> alloc)
     : AppData(0, 0, 0, 0, {}, nullptr, nullptr, nullptr, nullptr)
 {
     THolder<NActors::TActorSystemSetup> setup(new NActors::TActorSystemSetup);

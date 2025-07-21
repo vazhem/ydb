@@ -1553,9 +1553,10 @@ Y_UNIT_TEST_SUITE(TPDiskTest) {
         return data;
     }
 
-    void ChunkWriteDifferentOffsetAndSizeImpl(bool plainDataChunks) {
+    void ChunkWriteDifferentOffsetAndSizeImpl(bool plainDataChunks, bool rdmaAlloc) {
         TActorTestContext testCtx({
             .PlainDataChunks = plainDataChunks,
+            .UseRdmaAllocator = rdmaAlloc,
         });
         Cerr << "plainDataChunks# " << plainDataChunks << Endl;
 
@@ -1600,8 +1601,8 @@ Y_UNIT_TEST_SUITE(TPDiskTest) {
         }
     }
     Y_UNIT_TEST(ChunkWriteDifferentOffsetAndSize) {
-        for (int i = 0; i <= 1; ++i) {
-            ChunkWriteDifferentOffsetAndSizeImpl(i);
+        for (ui32 i = 0; i <= 3; ++i) {
+            ChunkWriteDifferentOffsetAndSizeImpl(i & 1, i & 2);
         }
     }
 
@@ -2537,7 +2538,7 @@ Y_UNIT_TEST_SUITE(RDMA) {
         };
         auto memPool = NInterconnect::NRdma::CreateDummyMemPool();
         auto alloc2 = [memPool](ui32 size, ui32 headRoom, ui32 tailRoom) -> TRcBuf {
-            TRcBuf buf = memPool->AllocRcBuf(size + headRoom + tailRoom);
+            TRcBuf buf = memPool->AllocRcBuf(size + headRoom + tailRoom, NInterconnect::NRdma::IMemPool::EMPTY).value();
             buf.TrimFront(size + tailRoom);
             buf.TrimBack(size);
             Cerr << "alloc2: " << buf.Size() << " " << buf.Tailroom() << " " << buf.UnsafeTailroom() << Endl;

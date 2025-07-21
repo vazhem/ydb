@@ -16,7 +16,7 @@ struct TActorSystemStub {
     NActors::TActivationContext* PrevCtx;
     TAppData AppData;
 
-    TActorSystemStub(TRcBufAllocator alloc = {}); 
+    TActorSystemStub(std::shared_ptr<IRcBufAllocator> alloc = {}); 
     ~TActorSystemStub();
 };
 
