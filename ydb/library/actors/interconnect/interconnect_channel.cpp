@@ -313,7 +313,7 @@ namespace NActors {
         if (!event.Buffer && event.Event) {
             std::optional<TRope> rope = event.Event->SerializeToRope(
                 //TODO: !!! handle allocation error
-                [&](ui32 size) -> TRcBuf { return RdmaMemPool->AllocRcBuf(size, NInterconnect::NRdma::IMemPool::EMPTY).value(); }
+                [&](ui32 size) -> TRcBuf { return RdmaMemPool->AllocRcBuf(size, NInterconnect::NRdma::IMemPool::BLOCK_MODE).value(); }
             );
             if (!rope) {
                 return false; // serialization failed
