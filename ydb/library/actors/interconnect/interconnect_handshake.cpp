@@ -374,7 +374,7 @@ namespace NActors {
                             ExternalDataChannel.GetSocketRef() = std::move(ev->Get()->Socket);
                         } else {
                             EstablishExternalDataChannel();
-                            if (HandShakeMemRegion) {
+                            if (HandShakeMemRegion && RdmaQp) {
                                 if (WaitRdmaReadResult() == false) {
                                     LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_ERROR,
                                         "RDMA memory read failed, disable rdma on the initiator");
@@ -1021,6 +1021,10 @@ namespace NActors {
                         RdmaQp.reset();
                         HandShakeMemRegion.reset();
                     }
+                } else {
+                    LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_ERROR,
+                        "Non success qp response from remote side");
+                    RdmaQp.reset();
                 }
 
                 // recover peer process info from peer's reply
@@ -1301,16 +1305,17 @@ namespace NActors {
                 // remember program info (assuming successful handshake)
                 ProgramInfo = GetProgramInfo(request);
 
-<<<<<<< HEAD
                 // copy request parameters as it goes out of scope
                 THashMap<TString, TString> params;
                 for (const auto& item : request.GetParams()) {
                     params.emplace(item.GetKey(), item.GetValue());
-=======
+                }
+
                 std::optional<NActorsInterconnect::TRdmaHandshake> rdmaIncommingHandshake;
                 if (RdmaQp && request.HasRdmaHandshake()) {
                     rdmaIncommingHandshake = request.GetRdmaHandshake();
->>>>>>> d943ba32e79 (Prepare QP on the both side of interconnect session (#19255))
+                } else {
+                    RdmaQp.reset();
                 }
 
                 // send to proxy
