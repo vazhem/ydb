@@ -1,4 +1,5 @@
-UNITTEST()
+GTEST()
+
 
 IF (OS_LINUX)
 
