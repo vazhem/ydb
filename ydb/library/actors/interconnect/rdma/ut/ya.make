@@ -3,6 +3,10 @@ GTEST()
 
 IF (OS_LINUX)
 
+CFLAGS(
+    -DIC_RDMA_GTEST
+)
+
 SRCS(
     allocator_ut.cpp
     ibv_ut.cpp
