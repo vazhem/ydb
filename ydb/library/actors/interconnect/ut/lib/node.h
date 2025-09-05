@@ -55,7 +55,7 @@ public:
         common->Settings.TCPSocketBufferSize = 2048 * 1024;
         common->Settings.SocketSendOptimization = sendOpt;
         common->OutgoingHandshakeInflightLimit = 3;
-        common->RdmaMemPool = NInterconnect::NRdma::CreateIncrementalMemPool();
+        common->RdmaMemPool = NInterconnect::NRdma::CreateIncrementalMemPool(nullptr);
 
         if (withTls) {
             common->Settings.Certificate = NInterconnect::GetCertificateForTest();
