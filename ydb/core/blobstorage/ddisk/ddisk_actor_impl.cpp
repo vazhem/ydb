@@ -198,11 +198,13 @@ void TDDiskActorImpl::HandleReserveChunksRequest(
     PendingReservations[reinterpret_cast<void*>(reservationCookie)] = TPendingChunkReservation(ev->Sender, ev->Cookie, chunkCount);
 
     // Create a request to PDisk to reserve chunks with cookie
+    // For block device storage, request raw chunks without metadata
     auto pdiskRequest = std::make_unique<NPDisk::TEvChunkReserve>(
         PDiskCtx->Dsk->Owner,
         PDiskCtx->Dsk->OwnerRound,
         chunkCount,
-        reservationCookie  // Pass cookie to PDisk
+        reservationCookie,  // Pass cookie to PDisk
+        true  // UseRawChunk for block device storage
     );
 
     // Send request to PDisk

@@ -741,11 +741,13 @@ class TChunkReserve : public TRequestBase {
 public:
     ui32 SizeChunks;
     ui64 Cookie;
+    bool UseRawChunk;
 
     TChunkReserve(const NPDisk::TEvChunkReserve &ev, const TActorId &sender, TAtomicBase reqIdx)
         : TRequestBase(sender, TReqId(TReqId::ChunkReserve, reqIdx), ev.Owner, ev.OwnerRound, NPriInternal::Other)
         , SizeChunks(ev.SizeChunks)
         , Cookie(ev.Cookie)
+        , UseRawChunk(ev.UseRawChunk)
     {}
 
     ERequestType GetType() const override {

@@ -831,6 +831,7 @@ struct TEvChunkReserve : TEventLocal<TEvChunkReserve, TEvBlobStorage::EvChunkRes
     TOwnerRound OwnerRound;
     ui32 SizeChunks;
     ui64 Cookie = 0;  // Optional cookie for tracking requests
+    bool UseRawChunk = false;  // Use raw chunks without metadata for block storage
 
     TEvChunkReserve(TOwner owner, TOwnerRound ownerRound, ui32 sizeChunks)
         : Owner(owner)
@@ -838,11 +839,12 @@ struct TEvChunkReserve : TEventLocal<TEvChunkReserve, TEvBlobStorage::EvChunkRes
         , SizeChunks(sizeChunks)
     {}
 
-    TEvChunkReserve(TOwner owner, TOwnerRound ownerRound, ui32 sizeChunks, ui64 cookie)
+    TEvChunkReserve(TOwner owner, TOwnerRound ownerRound, ui32 sizeChunks, ui64 cookie, bool useRawChunk = false)
         : Owner(owner)
         , OwnerRound(ownerRound)
         , SizeChunks(sizeChunks)
         , Cookie(cookie)
+        , UseRawChunk(useRawChunk)
     {}
 
     TString ToString() const {
