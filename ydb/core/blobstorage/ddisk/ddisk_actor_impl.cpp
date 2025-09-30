@@ -2,6 +2,8 @@
 #include "ddisk_actor_mode_memory.h"
 #include "ddisk_actor_mode_pdisk.h"
 #include "ddisk_actor_mode_direct.h"
+#include "ddisk_worker_actor.h"
+#include "ddisk_events.h"
 
 #include <ydb/core/base/services/blobstorage_service_id.h>
 #include <ydb/library/services/services.pb.h>
@@ -57,16 +59,40 @@ void TDDiskActorImpl::HandleReadRequest(
     const TEvBlobStorage::TEvDDiskReadRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
 {
-    // Delegate to mode-specific implementation
-    ProcessReadRequest(ev, ctx);
+    if (CurrentState == EDDiskState::Ready && !WorkerActors.empty()) {
+        // Forward to worker actor
+        TActorId workerId = SelectNextWorker();
+        LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+            "Forwarding DDisk read request #" << ev->Cookie
+            << " (chunkId=" << ev->Get()->Record.GetChunkId()
+            << ", offset=" << ev->Get()->Record.GetOffset()
+            << ", size=" << ev->Get()->Record.GetSize() << ") to worker " << workerId.ToString());
+
+        ctx.Send(ev->Forward(workerId));
+    } else {
+        // Handle in main actor (Init state or fallback)
+        ProcessReadRequest(ev, ctx);
+    }
 }
 
 void TDDiskActorImpl::HandleWriteRequest(
     const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
 {
-    // Delegate to mode-specific implementation
-    ProcessWriteRequest(ev, ctx);
+    if (CurrentState == EDDiskState::Ready && !WorkerActors.empty()) {
+        // Forward to worker actor
+        TActorId workerId = SelectNextWorker();
+        LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+            "Forwarding DDisk write request #" << ev->Cookie
+            << " (chunkId=" << ev->Get()->Record.GetChunkId()
+            << ", offset=" << ev->Get()->Record.GetOffset()
+            << ", size=" << ev->Get()->Record.GetSize() << ") to worker " << workerId.ToString());
+
+        ctx.Send(ev->Forward(workerId));
+    } else {
+        // Handle in main actor (Init state or fallback)
+        ProcessWriteRequest(ev, ctx);
+    }
 }
 
 void TDDiskActorImpl::HandleReserveChunksRequest(
@@ -182,6 +208,18 @@ void TDDiskActorImpl::HandleChunkReserveResult(
         LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
             "DDiskActorImpl: Chunk reservation successful, chunk size: " << ChunkSize
             << " device path: " << (DevicePath ? DevicePath : "NONE"));
+
+        // Transition to Ready state after first successful chunk allocation
+        if (CurrentState == EDDiskState::Init && BlockDevice != nullptr) {
+            LOG_INFO_S(ctx, NKikimrServices::BS_DDISK,
+                "DDiskActorImpl: Transitioning to Ready state after receiving BlockDevice info");
+            TransitionToReady(ctx);
+        }
+
+        // Broadcast updated chunk info to workers if they exist
+        if (CurrentState == EDDiskState::Ready && !WorkerActors.empty()) {
+            BroadcastChunkInfoUpdate(ctx);
+        }
     } else {
         response->Record.SetErrorReason(msg->ErrorReason);
         LOG_ERROR_S(ctx, NKikimrServices::BS_DDISK,
@@ -410,6 +448,87 @@ void TDDiskActorImpl::SendErrorResponse(const TPendingRequest& request, const TS
         response->Record.SetData(TString(request.Size, 0));
         ctx.Send(request.Sender, response.release(), 0, request.Cookie);
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Worker pool management
+
+void TDDiskActorImpl::TransitionToReady(const NActors::TActorContext& ctx)
+{
+    LOG_INFO_S(ctx, NKikimrServices::BS_DDISK,
+        "DDiskActorImpl: State transition: Init -> Ready");
+
+    CurrentState = EDDiskState::Ready;
+    CreateWorkerPool(ctx);
+}
+
+void TDDiskActorImpl::CreateWorkerPool(const NActors::TActorContext& ctx)
+{
+    LOG_INFO_S(ctx, NKikimrServices::BS_DDISK,
+        "DDiskActorImpl: Creating worker pool with " << DEFAULT_WORKER_COUNT << " workers");
+
+    // Create worker config with thread-safe data
+    TDDiskWorkerConfig config = CreateWorkerConfig();
+
+    for (ui32 i = 0; i < DEFAULT_WORKER_COUNT; ++i) {
+        auto worker = std::unique_ptr<NActors::IActor>(CreateDDiskWorkerActor(i, config));
+        TActorId workerId = ctx.RegisterWithSameMailbox(worker.release());
+        WorkerActors.push_back(workerId);
+
+        LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+            "DDiskActorImpl: Created worker " << i << " with ActorId: " << workerId.ToString());
+    }
+
+    LOG_INFO_S(ctx, NKikimrServices::BS_DDISK,
+        "DDiskActorImpl: Successfully created " << WorkerActors.size() << " worker actors");
+}
+
+TActorId TDDiskActorImpl::SelectNextWorker()
+{
+    if (WorkerActors.empty()) {
+        return TActorId{};  // Return invalid ID if no workers
+    }
+
+    TActorId workerId = WorkerActors[NextWorkerIndex];
+    NextWorkerIndex = (NextWorkerIndex + 1) % WorkerActors.size();
+    return workerId;
+}
+
+TDDiskWorkerConfig TDDiskActorImpl::CreateWorkerConfig() const
+{
+    TDDiskWorkerConfig config;
+    config.Mode = Mode;
+    config.BlockDevice = BlockDevice;
+    config.ChunkSize = ChunkSize;
+    config.SelfVDiskId = SelfVDiskId;
+    config.VDiskSlotId = Config->BaseInfo.VDiskSlotId;
+
+    // Copy chunk info map for thread safety
+    config.ChunkInfoMap = ChunkInfoMap;
+
+    return config;
+}
+
+void TDDiskActorImpl::BroadcastChunkInfoUpdate(const NActors::TActorContext& ctx)
+{
+    if (WorkerActors.empty()) {
+        LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+            "DDiskActorImpl: No workers to broadcast chunk info update to");
+        return;
+    }
+
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "DDiskActorImpl: Broadcasting chunk info update to " << WorkerActors.size()
+        << " workers with " << ChunkInfoMap.size() << " total chunks");
+
+    // Send separate event to each worker (events are not copyable)
+    for (const auto& workerId : WorkerActors) {
+        auto chunkUpdate = std::make_unique<TEvDDiskChunkInfoUpdate>(ChunkInfoMap);
+        ctx.Send(workerId, chunkUpdate.release());
+    }
+
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "DDiskActorImpl: Chunk info broadcast completed");
 }
 
 }   // namespace NKikimr

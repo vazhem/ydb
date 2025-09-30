@@ -7,6 +7,7 @@ SRCS(
     ddisk_actor_mode_pdisk.cpp
     ddisk_actor_mode_direct.cpp
     ddisk_actor_mode_direct_completion.cpp
+    ddisk_worker_actor.cpp
     skeleton/ddisk_skeletonfront.cpp
 )
 

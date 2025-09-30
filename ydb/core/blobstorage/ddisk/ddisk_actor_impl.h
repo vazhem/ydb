@@ -18,6 +18,9 @@
 
 namespace NKikimr {
 
+// Forward declaration
+struct TDDiskWorkerConfig;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 //
@@ -33,11 +36,21 @@ namespace NKikimr {
 class TDDiskActorImpl
     : public NActors::TActorBootstrapped<TDDiskActorImpl>
 {
+public:
+    // DDisk actor states
+    enum class EDDiskState {
+        Init,   // Initializing, PDisk not ready
+        Ready   // PDisk ready, workers created
+    };
+
 protected:
     TIntrusivePtr<TVDiskConfig> Config;
     TIntrusivePtr<TBlobStorageGroupInfo> GInfo;
     TVDiskID SelfVDiskId;
     TPDiskCtxPtr PDiskCtx;
+
+    // Actor state management
+    EDDiskState CurrentState;
 
     // PDisk initialization
     bool PDiskInitialized;
@@ -46,6 +59,11 @@ protected:
     // Block device interface for direct I/O (used by DIRECT_IO mode)
     NPDisk::IBlockDevice* BlockDevice;
     TString DevicePath;
+
+    // Worker pool management
+    static constexpr ui32 DEFAULT_WORKER_COUNT = 32;
+    TVector<TActorId> WorkerActors;
+    ui32 NextWorkerIndex;
 
     // Chunk management - track owned chunks for validation
     THashSet<ui32> KnownChunks;
@@ -129,9 +147,11 @@ public:
         : Config(std::move(cfg))
         , GInfo(std::move(info))
         , PDiskCtx(nullptr)
+        , CurrentState(EDDiskState::Init)
         , PDiskInitialized(false)
         , ChunkSize(0)  // Will be set during PDisk initialization
         , BlockDevice(nullptr)  // Will be set during PDisk initialization for DIRECT_IO mode
+        , NextWorkerIndex(0)
         , ChunkReservationInProgress(false)
         , ChunksPerReservation(10)  // Reserve chunks in batches
         , Mode(mode)
@@ -174,13 +194,23 @@ protected:
     void InitializePDisk(const NActors::TActorContext& ctx);
     void SendErrorResponse(const TPendingRequest& request, const TString& errorReason, const NActors::TActorContext& ctx);
 
+    // State transition methods
+    void TransitionToReady(const NActors::TActorContext& ctx);
+
+    // Worker pool management
+    void CreateWorkerPool(const NActors::TActorContext& ctx);
+    TActorId SelectNextWorker();
+    TDDiskWorkerConfig CreateWorkerConfig() const;
+    void BroadcastChunkInfoUpdate(const NActors::TActorContext& ctx);
+
 private:
     STFUNC(StateWork)
     {
         LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
             "🔥 DDISK STATEWORK: Received event type=" << ev->GetTypeRewrite()
             << " sender=" << ev->Sender.ToString()
-            << " cookie=" << ev->Cookie);
+            << " cookie=" << ev->Cookie
+            << " state=" << (ui32)CurrentState);
 
         switch (ev->GetTypeRewrite()) {
             HFunc(TEvBlobStorage::TEvDDiskReadRequest, HandleReadRequest);

@@ -153,4 +153,34 @@ namespace NKikimr {
         }
     };
 
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // DDisk Internal Events - Local events for DDisk worker coordination
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    // Event for updating chunk info in workers
+    struct TEvDDiskChunkInfoUpdate : public TEventLocal<TEvDDiskChunkInfoUpdate, 1000> {
+        struct TChunkUpdate {
+            ui32 ChunkId;
+            ui64 DeviceOffset;
+
+            TChunkUpdate() = default;
+            TChunkUpdate(ui32 chunkId, ui64 deviceOffset)
+                : ChunkId(chunkId), DeviceOffset(deviceOffset) {}
+        };
+
+        TVector<TChunkUpdate> ChunkUpdates;
+
+        TEvDDiskChunkInfoUpdate() = default;
+
+        // Forward declaration for TDDiskActorImpl::TChunkInfo
+        template<typename TChunkInfoMap>
+        TEvDDiskChunkInfoUpdate(const TChunkInfoMap& chunkInfoMap) {
+            for (const auto& [chunkId, chunkInfo] : chunkInfoMap) {
+                if (chunkInfo.IsReserved) {
+                    ChunkUpdates.emplace_back(chunkId, chunkInfo.DeviceOffset);
+                }
+            }
+        }
+    };
+
 } // namespace NKikimr
