@@ -163,10 +163,11 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
     }
 
     // Create simple completion handler that properly manages the buffer
-    // Create a copy of TraceId before the event is destroyed
-    auto traceIdCopy = ev->TraceId.Clone();
-    auto completion = new TDirectIOCompletion(ctx.SelfID, ev->Sender, ev->Cookie, originalRequestId, chunkId, offset, size, offsetAdjustment, isRead, alignedData, alignedSize, traceIdCopy);
-    LOG_DEBUG_S(ctx, NKikimrServices::BS_DEVICE,
+    auto completion = new TDirectIOCompletion(ctx.SelfID, ev->Sender, ev->Cookie,
+        originalRequestId, chunkId, offset, size, offsetAdjustment,
+        isRead, alignedData, alignedSize,
+        std::move(ev->TraceId.Clone()));
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
         "🔧 DDIRECT COMPLETION CREATED: VDiskSlotId=" << Config->BaseInfo.VDiskSlotId
         << " action=" << (void*)completion << " isRead=" << isRead << " TraceId=" << traceIdStr
         << " RequestId=" << originalRequestId);
@@ -194,6 +195,7 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
         << " BlockDevice=" << (void*)BlockDevice);
 
     // Perform asynchronous direct I/O operation with aligned offset and size
+    auto traceIdCopy = ev->TraceId.Clone();
     if constexpr (isRead) {
         BlockDevice->PreadAsync(alignedData, alignedSize, alignedDeviceOffset,
                                completion, NPDisk::TReqId(), &traceIdCopy);

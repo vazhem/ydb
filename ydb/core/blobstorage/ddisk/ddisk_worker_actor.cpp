@@ -4,6 +4,7 @@
 #include <ydb/core/base/services/blobstorage_service_id.h>
 #include <ydb/library/services/services.pb.h>
 #include <ydb/library/pdisk_io/sector_map.h>
+#include <ydb/library/wilson_ids/wilson.h>
 
 namespace NKikimr {
 
@@ -260,10 +261,12 @@ void TDDiskWorkerActor::ProcessDirectIORequest(
     }
 
     // Create completion handler that properly manages the buffer
-    auto traceIdCopy = ev->TraceId.Clone();
-    auto completion = new TDirectIOCompletion(ctx.SelfID, ev->Sender, ev->Cookie, originalRequestId, chunkId, offset, size, offsetAdjustment, isRead, alignedData, alignedSize, traceIdCopy);
+    auto completion = new TDirectIOCompletion(ctx.SelfID, ev->Sender, ev->Cookie,
+        originalRequestId, chunkId, offset, size, offsetAdjustment,
+        isRead, alignedData, alignedSize,
+        std::move(ev->TraceId.Clone()));
 
-    LOG_DEBUG_S(ctx, NKikimrServices::BS_DEVICE,
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
         "[Worker" << WorkerId << "] DIRECT COMPLETION CREATED: VDiskSlotId=" << Config.VDiskSlotId
         << " action=" << (void*)completion << " isRead=" << isRead << " TraceId=" << traceIdStr
         << " RequestId=" << originalRequestId);
@@ -288,8 +291,9 @@ void TDDiskWorkerActor::ProcessDirectIORequest(
     }
 
     // Perform the actual I/O operation
+    NWilson::TTraceId traceIdCopy = ev->TraceId.Clone();
     if constexpr (isRead) {
-        LOG_DEBUG_S(ctx, NKikimrServices::BS_DEVICE,
+        LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
             "[Worker" << WorkerId << "] CALLING BlockDevice->PreadAsync: offset=" << alignedDeviceOffset
             << " size=" << alignedSize << " buffer=" << (void*)alignedData
             << " completion=" << (void*)completion);
@@ -297,7 +301,7 @@ void TDDiskWorkerActor::ProcessDirectIORequest(
         BlockDevice->PreadAsync(alignedData, alignedSize, alignedDeviceOffset,
                                      completion, NPDisk::TReqId(), &traceIdCopy);
     } else {
-        LOG_DEBUG_S(ctx, NKikimrServices::BS_DEVICE,
+        LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
             "[Worker" << WorkerId << "] CALLING BlockDevice->PwriteAsync: offset=" << alignedDeviceOffset
             << " size=" << alignedSize << " buffer=" << (void*)alignedData
             << " completion=" << (void*)completion);

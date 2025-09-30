@@ -5,6 +5,8 @@
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_completion.h>
 #include <ydb/core/blobstorage/base/blobstorage_events.h>
 #include <ydb/core/blobstorage/ddisk/ddisk_events.h>
+#include <ydb/library/actors/wilson/wilson_trace.h>
+#include <ydb/library/wilson_ids/wilson.h>
 #include <util/generic/hash.h>
 #include <memory>
 
@@ -27,12 +29,13 @@ private:
     char* AlignedBuffer;  // Simple aligned buffer using aligned_alloc
     ui32 AlignedSize;
     mutable std::atomic<bool> ExecutedOrReleased{false};
+    NWilson::TSpan Span;  // Wilson tracing span for this operation
 
 public:
     TDirectIOCompletion(const TActorId& ddiskActorId, const TActorId& originalSender,
                        ui64 originalCookie, ui64 requestId, TChunkIdx chunkIdx, ui32 originalOffset,
                        ui32 originalSize, ui32 offsetAdjustment, bool isRead,
-                       char* alignedBuffer, ui32 alignedSize, const NWilson::TTraceId& traceId = {})
+                       char* alignedBuffer, ui32 alignedSize, NWilson::TTraceId traceId)
         : DDiskActorId(ddiskActorId)
         , OriginalSender(originalSender)
         , OriginalCookie(originalCookie)
@@ -44,6 +47,7 @@ public:
         , IsRead(isRead)
         , AlignedBuffer(alignedBuffer)
         , AlignedSize(alignedSize)
+        , Span(TWilson::BlobStorage, std::move(traceId), isRead ? "DDisk.DirectReadCompletion" : "DDisk.DirectWriteCompletion")
     {
         // Initialize base class TCompletionAction fields
         OperationIdx = 0;  // Will be set by PDisk when operation is scheduled
@@ -52,7 +56,7 @@ public:
         CostNs = 0;
         Result = NPDisk::EIoResult::Unknown;
         ErrorReason = "";
-        TraceId = NWilson::TTraceId(traceId);
+        TraceId = NWilson::TTraceId(Span.GetTraceId());
     }
 
     virtual ~TDirectIOCompletion() {

@@ -13,6 +13,7 @@
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_mon.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_config.h>
 #include <ydb/library/pdisk_io/sector_map.h>
+#include <ydb/library/wilson_ids/wilson.h>
 
 namespace NKikimr {
 
@@ -63,40 +64,38 @@ void TDDiskActorImpl::HandleReadRequest(
     const TEvBlobStorage::TEvDDiskReadRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
 {
-    if (CurrentState == EDDiskState::Ready && !WorkerActors.empty()) {
         // Forward to worker actor
         TActorId workerId = SelectNextWorker();
+
         LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
             "Forwarding DDisk read request #" << ev->Cookie
             << " (chunkId=" << ev->Get()->Record.GetChunkId()
             << ", offset=" << ev->Get()->Record.GetOffset()
-            << ", size=" << ev->Get()->Record.GetSize() << ") to worker " << workerId.ToString());
+            << ", size=" << ev->Get()->Record.GetSize() << ") to worker " << workerId.ToString()
+            << " traceId=" << ev->TraceId.GetHexTraceId());
 
-        ctx.Send(ev->Forward(workerId));
-    } else {
-        // Handle in main actor (Init state or fallback)
-        ProcessReadRequest(ev, ctx);
-    }
+        // Forward to worker
+        ctx.Send(new IEventHandle(workerId, ev->Sender, ev->Release().Release(),
+            ev->Flags, ev->Cookie, nullptr, std::move(ev->TraceId.Clone())));
 }
 
 void TDDiskActorImpl::HandleWriteRequest(
     const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
 {
-    if (CurrentState == EDDiskState::Ready && !WorkerActors.empty()) {
-        // Forward to worker actor
-        TActorId workerId = SelectNextWorker();
-        LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
-            "Forwarding DDisk write request #" << ev->Cookie
-            << " (chunkId=" << ev->Get()->Record.GetChunkId()
-            << ", offset=" << ev->Get()->Record.GetOffset()
-            << ", size=" << ev->Get()->Record.GetSize() << ") to worker " << workerId.ToString());
+    // Forward to worker actor
+    TActorId workerId = SelectNextWorker();
 
-        ctx.Send(ev->Forward(workerId));
-    } else {
-        // Handle in main actor (Init state or fallback)
-        ProcessWriteRequest(ev, ctx);
-    }
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "Forwarding DDisk write request #" << ev->Cookie
+        << " (chunkId=" << ev->Get()->Record.GetChunkId()
+        << ", offset=" << ev->Get()->Record.GetOffset()
+        << ", size=" << ev->Get()->Record.GetSize() << ") to worker " << workerId.ToString()
+        << " traceId=" << ev->TraceId.GetHexTraceId());
+
+    // Forward to worker
+    ctx.Send(new IEventHandle(workerId, ev->Sender, ev->Release().Release(),
+        ev->Flags, ev->Cookie, nullptr, std::move(ev->TraceId.Clone())));
 }
 
 void TDDiskActorImpl::HandleReserveChunksRequest(
@@ -375,6 +374,16 @@ void TDDiskActorImpl::HandleChunkWriteResult(
         << " vDiskId=" << SelfVDiskId.ToString());
 
     ctx.Send(request.Sender, response.release(), 0, request.Cookie);
+
+    // End Wilson span with appropriate status (need to make a copy to modify)
+    auto span = std::move(const_cast<TPendingRequest&>(request).Span);
+    if (span) {
+        if (msg->Status == NKikimrProto::OK) {
+            span.EndOk();
+        } else {
+            span.EndError(msg->ErrorReason);
+        }
+    }
 
     // Clean up pending request
     PendingRequests.erase(it);

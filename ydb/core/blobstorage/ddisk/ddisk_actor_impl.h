@@ -11,6 +11,7 @@
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_blockdevice.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_completion.h>
+#include <ydb/library/actors/wilson/wilson_trace.h>
 
 #include <util/generic/hash.h>
 #include <util/generic/queue.h>
@@ -80,10 +81,11 @@ protected:
         TString WriteData;  // For write requests
         ui64 OriginalRequestId;  // Original request ID for traceability
         bool IsDirectIO;  // Flag to track if this is a DirectIO request
+        NWilson::TSpan Span;  // Wilson tracing span for this request
 
         TPendingRequest() = default;
-        TPendingRequest(ui32 offset, ui32 size, ui32 chunkId, TActorId sender, ui64 cookie, bool isWrite, const TString& writeData = "", ui64 originalRequestId = 0, bool isDirectIO = false)
-            : Offset(offset), Size(size), ChunkId(chunkId), Sender(sender), Cookie(cookie), IsWrite(isWrite), WriteData(writeData), OriginalRequestId(originalRequestId), IsDirectIO(isDirectIO) {}
+        TPendingRequest(ui32 offset, ui32 size, ui32 chunkId, TActorId sender, ui64 cookie, bool isWrite, const TString& writeData = "", ui64 originalRequestId = 0, bool isDirectIO = false, NWilson::TSpan span = NWilson::TSpan())
+            : Offset(offset), Size(size), ChunkId(chunkId), Sender(sender), Cookie(cookie), IsWrite(isWrite), WriteData(writeData), OriginalRequestId(originalRequestId), IsDirectIO(isDirectIO), Span(std::move(span)) {}
     };
 
     THashMap<void*, TPendingRequest> PendingRequests;

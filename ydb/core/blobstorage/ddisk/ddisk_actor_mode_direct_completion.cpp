@@ -72,6 +72,19 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
             << " dataSize=" << (response->Record.HasData() ? response->Record.GetData().size() : 0)
             << " traceId=" << TraceId.GetHexTraceId());
 
+        // End Wilson span before sending response
+        if (Span) {
+            if (status == NKikimrProto::OK) {
+                LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK, "DDISK completiton span end ok");
+                Span.EndOk();
+            } else {
+                Span.EndError(ErrorReason);
+                LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK, "DDISK completiton span end error");
+            }
+        } else {
+            LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK, "DDISK completiton no span");
+        }
+
         actorSystem->Send(new IEventHandle(OriginalSender, TActorId(), response.release(), 0, OriginalCookie, nullptr, std::move(TraceId)));
     } else {
         // Handle write completion - send TEvDDiskWriteResponse directly to original sender
@@ -92,6 +105,15 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
             << " status=" << (ui32)status
             << " traceId=" << TraceId.GetHexTraceId());
 
+        // End Wilson span before sending response
+        if (Span) {
+            if (status == NKikimrProto::OK) {
+                Span.EndOk();
+            } else {
+                Span.EndError(ErrorReason);
+            }
+        }
+
         actorSystem->Send(new IEventHandle(OriginalSender, TActorId(), response.release(), 0, OriginalCookie, nullptr, std::move(TraceId)));
     }
 
@@ -100,12 +122,6 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
         << " OriginalSender=" << OriginalSender.ToString() << " status=" << (ui32)status
         << " traceId=" << TraceId.GetHexTraceId());
 
-    // Сохраняем значения для логирования перед удалением объекта
-    const void* thisPtr = this;
-    ui64 requestId = RequestId;
-    ui32 chunkIdx = ChunkIdx;
-    bool isRead = IsRead;
-    TString traceIdStr = TraceId.GetHexTraceId();
 
     // Логирование перед удалением объекта
     LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
@@ -117,12 +133,6 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
     // Удаляем объект здесь - PDisk вызывает либо Exec, либо Release, но не оба
     // Буфер будет освобожден в деструкторе
     delete this;
-
-    // Логирование после удаления объекта с использованием сохраненных значений
-    LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
-        "💀 TDirectIOCompletion::Exec OBJECT DELETED: this=" << thisPtr
-        << " RequestId=" << requestId << " ChunkIdx=" << chunkIdx << " IsRead=" << isRead
-        << " traceId=" << traceIdStr);
 }
 
 void TDirectIOCompletion::Release(TActorSystem *actorSystem) {
@@ -147,6 +157,14 @@ void TDirectIOCompletion::Release(TActorSystem *actorSystem) {
         << " OriginalSender=" << OriginalSender.ToString() << " traceId=" << TraceId.GetHexTraceId()
         << " ExecutedOrReleased=" << ExecutedOrReleased.load());
 
+    // Save trace ID string before any moves in Release method
+    TString releaseTraceIdHex = TraceId.GetHexTraceId();
+
+    // End Wilson span before sending error responses
+    if (Span) {
+        Span.EndError(ErrorReason);
+    }
+
     // Send error response directly to original sender
     if (IsRead) {
         auto response = std::make_unique<TEvBlobStorage::TEvDDiskReadResponse>();
@@ -156,6 +174,11 @@ void TDirectIOCompletion::Release(TActorSystem *actorSystem) {
         response->Record.SetChunkId(ChunkIdx);
         response->Record.SetErrorReason(ErrorReason);
         actorSystem->Send(new IEventHandle(OriginalSender, TActorId(), response.release(), 0, OriginalCookie, nullptr, std::move(TraceId)));
+
+        LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
+            "📤 TDirectIOCompletion::Release sent error response: this=" << (void*)this
+            << " OriginalSender=" << OriginalSender.ToString() << " ErrorReason=" << ErrorReason
+            << " traceId=" << releaseTraceIdHex);
     } else {
         auto response = std::make_unique<TEvBlobStorage::TEvDDiskWriteResponse>();
         response->Record.SetStatus(NKikimrProto::ERROR);
@@ -166,18 +189,6 @@ void TDirectIOCompletion::Release(TActorSystem *actorSystem) {
         actorSystem->Send(new IEventHandle(OriginalSender, TActorId(), response.release(), 0, OriginalCookie, nullptr, std::move(TraceId)));
     }
 
-    LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
-        "📤 TDirectIOCompletion::Release sent error response: this=" << (void*)this
-        << " OriginalSender=" << OriginalSender.ToString() << " ErrorReason=" << ErrorReason
-        << " traceId=" << TraceId.GetHexTraceId());
-
-    // Сохраняем значения для логирования перед удалением объекта
-    const void* thisPtr = this;
-    ui64 requestId = RequestId;
-    ui32 chunkIdx = ChunkIdx;
-    bool isRead = IsRead;
-    TString traceIdStr = TraceId.GetHexTraceId();
-
     // Логирование перед удалением объекта
     LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
         "💀 TDirectIOCompletion::Release OBJECT DELETING: this=" << (void*)this
@@ -187,12 +198,6 @@ void TDirectIOCompletion::Release(TActorSystem *actorSystem) {
 
     // Теперь безопасно удаляем объект - PDisk больше не будет его использовать
     delete this;
-
-    // Логирование после удаления объекта с использованием сохраненных значений
-    LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
-        "💀 TDirectIOCompletion::Release OBJECT DELETED: this=" << thisPtr
-        << " RequestId=" << requestId << " ChunkIdx=" << chunkIdx << " IsRead=" << isRead
-        << " traceId=" << traceIdStr);
 }
 
 }   // namespace NKikimr
