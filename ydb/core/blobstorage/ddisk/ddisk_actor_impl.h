@@ -14,6 +14,7 @@
 
 #include <util/generic/hash.h>
 #include <util/generic/queue.h>
+#include <memory>
 
 namespace NKikimr {
 
@@ -27,12 +28,12 @@ namespace NKikimr {
 ////////////////////////////////////////////////////////////////////////////////
 
 //
-// DDisk actor implementation for ErasureMirror3Direct
+// DDisk actor base abstract class for ErasureMirror3Direct
 //
-class TDDiskActorImpl final
+class TDDiskActorImpl
     : public NActors::TActorBootstrapped<TDDiskActorImpl>
 {
-private:
+protected:
     TIntrusivePtr<TVDiskConfig> Config;
     TIntrusivePtr<TBlobStorageGroupInfo> GInfo;
     TVDiskID SelfVDiskId;
@@ -41,6 +42,10 @@ private:
     // PDisk initialization
     bool PDiskInitialized;
     ui32 ChunkSize;  // PDisk chunk size received during initialization
+
+    // Block device interface for direct I/O (used by DIRECT_IO mode)
+    NPDisk::IBlockDevice* BlockDevice;
+    TString DevicePath;
 
     // Chunk management - track owned chunks for validation
     THashSet<ui32> KnownChunks;
@@ -82,41 +87,15 @@ private:
     bool ChunkReservationInProgress;
     ui32 ChunksPerReservation;
 
-    // IN-MEMORY STORAGE IMPLEMENTATION FOR DEBUGGING
-    // This bypasses PDisk entirely to isolate corruption issues
-    bool UseInMemoryStorage = false;
-
-    // In-memory chunk data structure
-    struct TChunkData {
-        TString Data;
-
-        TChunkData() = default;
-        TChunkData(const TString& data) : Data(data) {}
-
-        TString ReadData(ui32 offset, ui32 size) const {
-            if (offset >= Data.size()) {
-                return TString(size, '\0');
-            }
-            ui32 availableSize = Min(size, static_cast<ui32>(Data.size()) - offset);
-            return Data.substr(offset, availableSize) + TString(size - availableSize, '\0');
-        }
-
-        void WriteData(ui32 offset, const TString& data) {
-            if (offset + data.size() > Data.size()) {
-                Data.resize(offset + data.size());
-            }
-            memcpy(const_cast<char*>(Data.data()) + offset, data.data(), data.size());
-        }
+public:
+    // DDisk operation mode
+    enum class EDDiskMode {
+        MEMORY,         // In-memory storage for debugging
+        PDISK_EVENTS,   // Use PDisk events (traditional PDisk interface)
+        DIRECT_IO       // Direct device I/O to chunks (uses PDisk PwriteAsync, PreadAsync)
     };
 
-    THashMap<ui32, TChunkData> InMemoryChunks;
-
-    // DDiskWriter Direct Device I/O (bypasses PDisk)
-    TActorId DDiskWriterId;
-    TString DevicePath;
-    bool UseDirectDeviceIO = true;  // Use direct device I/O instead of PDisk
-    NPDisk::IBlockDevice* BlockDevice = nullptr;  // PDisk's block device interface for direct I/O
-
+    EDDiskMode Mode;
 
     // Chunk reservation info from PDisk (for device access)
     struct TChunkInfo {
@@ -128,67 +107,14 @@ private:
     };
     THashMap<ui32, TChunkInfo> ChunkInfoMap;  // chunkId -> device offset
 
-    // Simple direct I/O completion handler that doesn't interfere with PDisk buffer management
-    class TDirectIOCompletion : public NPDisk::TCompletionAction {
-    private:
-        TActorId DDiskActorId;  // DDisk actor ID for logging
-        TActorId OriginalSender;  // The original request sender
-        ui64 OriginalCookie;     // The original request cookie
-        ui64 RequestId;          // The request ID for traceability
-        TChunkIdx ChunkIdx;
-        ui32 OriginalOffset;
-        ui32 OriginalSize;
-        ui32 OffsetAdjustment;
-        bool IsRead;
-        char* AlignedBuffer;  // Simple aligned buffer using aligned_alloc
-        ui32 AlignedSize;
-        mutable std::atomic<bool> ExecutedOrReleased{false};
+    // Virtual methods for different modes - to be implemented by derived classes
+    virtual void ProcessReadRequest(
+        const TEvBlobStorage::TEvDDiskReadRequest::TPtr& ev,
+        const NActors::TActorContext& ctx) = 0;
 
-    public:
-        TDirectIOCompletion(const TActorId& ddiskActorId, const TActorId& originalSender,
-                           ui64 originalCookie, ui64 requestId, TChunkIdx chunkIdx, ui32 originalOffset,
-                           ui32 originalSize, ui32 offsetAdjustment, bool isRead,
-                           char* alignedBuffer, ui32 alignedSize, const NWilson::TTraceId& traceId = {})
-            : DDiskActorId(ddiskActorId)
-            , OriginalSender(originalSender)
-            , OriginalCookie(originalCookie)
-            , RequestId(requestId)
-            , ChunkIdx(chunkIdx)
-            , OriginalOffset(originalOffset)
-            , OriginalSize(originalSize)
-            , OffsetAdjustment(offsetAdjustment)
-            , IsRead(isRead)
-            , AlignedBuffer(alignedBuffer)
-            , AlignedSize(alignedSize)
-        {
-            // Initialize base class TCompletionAction fields
-            OperationIdx = 0;  // Will be set by PDisk when operation is scheduled
-            SubmitTime = 0;
-            FlushAction = nullptr;
-            CostNs = 0;
-            Result = NPDisk::EIoResult::Unknown;
-            ErrorReason = "";
-            TraceId = NWilson::TTraceId(traceId);
-        }
-
-        virtual ~TDirectIOCompletion() {
-            if (AlignedBuffer) {
-                free(AlignedBuffer);
-                AlignedBuffer = nullptr;
-            }
-        }
-
-        char* Data() const { return AlignedBuffer; }
-        ui32 Size() const { return AlignedSize; }
-
-        bool CanHandleResult() const override {
-            // Always handle result, even for errors - we want to send responses
-            return true;
-        }
-
-        void Exec(TActorSystem* actorSystem) override;
-        void Release(TActorSystem* actorSystem) override;
-    };
+    virtual void ProcessWriteRequest(
+        const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
+        const NActors::TActorContext& ctx) = 0;
 
 public:
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
@@ -198,19 +124,55 @@ public:
     TDDiskActorImpl(
         TIntrusivePtr<TVDiskConfig> cfg,
         TIntrusivePtr<TBlobStorageGroupInfo> info,
+        EDDiskMode mode,
         const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters)
         : Config(std::move(cfg))
         , GInfo(std::move(info))
         , PDiskCtx(nullptr)
         , PDiskInitialized(false)
         , ChunkSize(0)  // Will be set during PDisk initialization
+        , BlockDevice(nullptr)  // Will be set during PDisk initialization for DIRECT_IO mode
         , ChunkReservationInProgress(false)
         , ChunksPerReservation(10)  // Reserve chunks in batches
+        , Mode(mode)
     {
         Y_UNUSED(counters);
     }
 
     void Bootstrap(const NActors::TActorContext& ctx);
+
+    // Factory method to create appropriate instance based on mode
+    static std::unique_ptr<TDDiskActorImpl> Create(
+        TIntrusivePtr<TVDiskConfig> cfg,
+        TIntrusivePtr<TBlobStorageGroupInfo> info,
+        EDDiskMode mode,
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters);
+
+protected:
+    // Common handlers
+    void HandleReserveChunksRequest(
+        const TEvBlobStorage::TEvDDiskReserveChunksRequest::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleChunkReserveResult(
+        const NPDisk::TEvChunkReserveResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleChunkReadResult(
+        const NPDisk::TEvChunkReadResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleChunkWriteResult(
+        const NPDisk::TEvChunkWriteResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleYardInitResult(
+        const NPDisk::TEvYardInitResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    // Helper methods
+    void InitializePDisk(const NActors::TActorContext& ctx);
+    void SendErrorResponse(const TPendingRequest& request, const TString& errorReason, const NActors::TActorContext& ctx);
 
 private:
     STFUNC(StateWork)
@@ -244,34 +206,11 @@ private:
     void HandleWriteRequest(
         const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
         const NActors::TActorContext& ctx);
-
-    void HandleReserveChunksRequest(
-        const TEvBlobStorage::TEvDDiskReserveChunksRequest::TPtr& ev,
-        const NActors::TActorContext& ctx);
-
-    void HandleChunkReserveResult(
-        const NPDisk::TEvChunkReserveResult::TPtr& ev,
-        const NActors::TActorContext& ctx);
-
-    void HandleChunkReadResult(
-        const NPDisk::TEvChunkReadResult::TPtr& ev,
-        const NActors::TActorContext& ctx);
-
-    void HandleChunkWriteResult(
-        const NPDisk::TEvChunkWriteResult::TPtr& ev,
-        const NActors::TActorContext& ctx);
-
-    void HandleYardInitResult(
-        const NPDisk::TEvYardInitResult::TPtr& ev,
-        const NActors::TActorContext& ctx);
-
-    // Helper methods
-    void InitializePDisk(const NActors::TActorContext& ctx);
-    // Helper methods for chunk management (legacy - kept for backwards compatibility)
-    void EnsureChunksAvailable(const NActors::TActorContext& ctx);
-
-    // Helper methods for error handling
-    void SendErrorResponse(const TPendingRequest& request, const TString& errorReason, const NActors::TActorContext& ctx);
 };
+
+// Forward declarations for mode-specific implementations
+class TDDiskMemoryActor;
+class TDDiskPDiskEventsActor;
+class TDDiskDirectIOActor;
 
 }   // namespace NKikimr

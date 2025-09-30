@@ -51,7 +51,14 @@ namespace NKikimr {
                                      const TIntrusivePtr<::NMonitoring::TDynamicCounters> &counters) {
         // DDisk will initialize PDisk connection during Bootstrap via TEvYardInit
         // No need to create mock PDisk context - it will be established dynamically
-        return new TDDiskActorImpl(cfg, info, counters);
+
+        // Determine the mode based on configuration or environment
+        // For now, default to DIRECT_IO mode, but this can be made configurable
+        TDDiskActorImpl::EDDiskMode mode = TDDiskActorImpl::EDDiskMode::DIRECT_IO;
+
+        // TODO: Make mode configurable
+        // Create the appropriate instance using the factory method
+        return TDDiskActorImpl::Create(cfg, info, mode, counters).release();
     }
 
 } // NKikimr
