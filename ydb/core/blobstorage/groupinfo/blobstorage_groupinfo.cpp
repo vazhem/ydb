@@ -509,6 +509,7 @@ IBlobToDiskMapper *TBlobStorageGroupInfo::TTopology::CreateMapper(TBlobStorageGr
         case TBlobStorageGroupType::Erasure2Plus2Block:
         case TBlobStorageGroupType::Erasure2Plus2Stripe:
         case TBlobStorageGroupType::ErasureMirror3of4:
+        case TBlobStorageGroupType::ErasureMirror3Direct:
             return IBlobToDiskMapper::CreateBasicMapper(topology);
 
         case TBlobStorageGroupType::ErasureMirror3dc:
@@ -546,6 +547,7 @@ TBlobStorageGroupInfo::IQuorumChecker *TBlobStorageGroupInfo::TTopology::CreateQ
             return new TQuorumCheckerMirror3dc(topology);
 
         case TBlobStorageGroupType::ErasureMirror3of4:
+        case TBlobStorageGroupType::ErasureMirror3Direct:
             return new TQuorumCheckerMirror3of4(topology);
 
         default:
@@ -584,6 +586,7 @@ TBlobStorageGroupInfo::TTopology::CreateDataIntegrityChecker(const TTopology* to
             return new TDataIntegrityCheckerMirror3dc(topology);
 
         case TBlobStorageGroupType::ErasureMirror3of4:
+        case TBlobStorageGroupType::ErasureMirror3Direct:
             return new TDataIntegrityCheckerMirror3of4(topology);
 
         default:
