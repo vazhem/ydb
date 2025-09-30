@@ -7,6 +7,8 @@
 #include <ydb/core/blobstorage/vdisk/common/vdisk_config.h>
 #include <ydb/core/blobstorage/groupinfo/blobstorage_groupinfo.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_blockdevice.h>
+#include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_util_devicemode.h>
+#include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_mon.h>
 #include <ydb/core/blobstorage/ddisk/ddisk_actor_impl.h>
 #include <ydb/core/blobstorage/ddisk/ddisk_events.h>
 
@@ -20,7 +22,8 @@ namespace NKikimr {
 // Configuration data that workers need to operate independently
 struct TDDiskWorkerConfig {
     TDDiskActorImpl::EDDiskMode Mode;
-    NPDisk::IBlockDevice* BlockDevice;
+    TFileHandle *SharedFileHandle;  // Shared file handle from PDisk for creating RealBlockDevice
+    TString DevicePath;  // Device path (for monitoring and debugging purposes)
     ui32 ChunkSize;
     TVDiskID SelfVDiskId;
     ui32 VDiskSlotId;
@@ -41,6 +44,11 @@ class TDDiskWorkerActor : public NActors::TActor<TDDiskWorkerActor> {
 private:
     ui32 WorkerId;
     TDDiskWorkerConfig Config;
+
+    // Worker's own RealBlockDevice instance (with improved locking)
+    std::unique_ptr<NPDisk::IBlockDevice> BlockDevice;
+    std::unique_ptr<TPDiskMon> PdiskMon;  // Monitoring for block device
+    std::unique_ptr<TPDiskConfig> PdiskConfig;  // Config for monitoring
 
     // Pending operations tracking (similar to main actor)
     struct TPendingRequest {

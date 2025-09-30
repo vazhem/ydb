@@ -3,6 +3,7 @@
 
 #include <ydb/core/base/services/blobstorage_service_id.h>
 #include <ydb/library/services/services.pb.h>
+#include <ydb/library/pdisk_io/sector_map.h>
 
 namespace NKikimr {
 
@@ -15,6 +16,45 @@ TDDiskWorkerActor::TDDiskWorkerActor(ui32 workerId, const TDDiskWorkerConfig& co
     , WorkerId(workerId)
     , Config(config)
 {
+    // Create PDisk monitoring structure for the block device
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> counters = new ::NMonitoring::TDynamicCounters;
+
+    // Create minimal TPDiskConfig for monitoring (SSD category)
+    PdiskConfig = std::make_unique<TPDiskConfig>(0, Config.VDiskSlotId, (ui64)NKikimrBlobStorage::EPDiskType::SSD);
+
+    PdiskMon = std::make_unique<TPDiskMon>(counters,
+                                           Config.VDiskSlotId,
+                                           PdiskConfig.get());
+
+    // Create RealBlockDevice for DDisk worker using shared file handle
+    NPDisk::TDeviceMode::TFlags flags = NPDisk::TDeviceMode::None;  // No LockFile flag - PDisk handles locking
+    TIntrusivePtr<NPDisk::TSectorMap> sectorMap = nullptr;  // Not used for DDisk workers
+
+    LOG_INFO_S(TlsActivationContext->AsActorContext(), NKikimrServices::BS_DDISK,
+        "[Worker" << WorkerId << "] Creating RealBlockDevice with shared file handle for device: " << Config.DevicePath);
+
+    // Create unique prefix for DDisk worker threads using WorkerId
+    TString threadPrefix = TStringBuilder() << "DD" << WorkerId;
+
+    BlockDevice.reset(NPDisk::CreateRealBlockDeviceWithFileDefaults(
+        Config.SharedFileHandle,  // Use shared file handle from PDisk
+        Config.DevicePath,        // Device path for monitoring/debugging
+        *PdiskMon,
+        flags,
+        sectorMap,
+        TlsActivationContext->ExecutorThread.ActorSystem,
+        nullptr,  // No PDisk instance needed
+        threadPrefix.c_str()      // Use unique prefix for DDisk worker threads
+    ));
+
+    if (!BlockDevice) {
+        Y_ABORT("Failed to create RealBlockDevice for worker %u with shared file handle, device path: %s",
+                WorkerId, Config.DevicePath.c_str());
+    }
+
+    LOG_INFO_S(TlsActivationContext->AsActorContext(), NKikimrServices::BS_DDISK,
+        "[Worker" << WorkerId << "] Successfully created RealBlockDevice with shared file handle for device: " << Config.DevicePath
+        << " BlockDevice=" << (void*)BlockDevice.get());
 }
 
 void TDDiskWorkerActor::HandleReadRequest(
@@ -114,7 +154,7 @@ void TDDiskWorkerActor::ProcessDirectIORequest(
         << " vDiskId=" << Config.SelfVDiskId.ToString()
         << " vSlotId=" << Config.VDiskSlotId
         << " Mode=" << (ui32)Config.Mode
-        << " BlockDevice=" << (void*)Config.BlockDevice);
+        << " BlockDevice=" << (void*)BlockDevice.get());
 
     // For write operations, validate data size
     if constexpr (!isRead) {
@@ -128,7 +168,7 @@ void TDDiskWorkerActor::ProcessDirectIORequest(
     }
 
     // Check if we have block device for direct I/O
-    if (!Config.BlockDevice) {
+    if (!BlockDevice) {
         LOG_ERROR_S(ctx, NKikimrServices::BS_DDISK,
             "[Worker" << WorkerId << "] Direct device I/O enabled but no block device available");
         sendErrorResponse("No block device available for direct I/O");
@@ -254,7 +294,7 @@ void TDDiskWorkerActor::ProcessDirectIORequest(
             << " size=" << alignedSize << " buffer=" << (void*)alignedData
             << " completion=" << (void*)completion);
 
-        Config.BlockDevice->PreadAsync(alignedData, alignedSize, alignedDeviceOffset,
+        BlockDevice->PreadAsync(alignedData, alignedSize, alignedDeviceOffset,
                                      completion, NPDisk::TReqId(), &traceIdCopy);
     } else {
         LOG_DEBUG_S(ctx, NKikimrServices::BS_DEVICE,
@@ -262,7 +302,7 @@ void TDDiskWorkerActor::ProcessDirectIORequest(
             << " size=" << alignedSize << " buffer=" << (void*)alignedData
             << " completion=" << (void*)completion);
 
-        Config.BlockDevice->PwriteAsync(alignedData, alignedSize, alignedDeviceOffset,
+        BlockDevice->PwriteAsync(alignedData, alignedSize, alignedDeviceOffset,
                                       completion, NPDisk::TReqId(), &traceIdCopy);
     }
 }

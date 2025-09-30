@@ -6,18 +6,20 @@
 #include "blobstorage_pdisk_util_devicemode.h"
 
 #include <ydb/core/base/blobstorage.h>
-#include <ydb/core/control/lib/immediate_control_board_wrapper.h>
+#include <ydb/core/control/immediate_control_board_wrapper.h>
 #include <ydb/library/pdisk_io/aio.h>
 #include <ydb/library/pdisk_io/drivedata.h>
 #include <ydb/library/pdisk_io/sector_map.h>
+
+namespace NActors {
+class TActorSystem;
+}
 
 namespace NKikimr {
 
 struct TPDiskMon;
 
 namespace NPDisk {
-
-struct TPDiskCtx;
 
 ////////////////////////////////////////////////////////////////////////////
 // IBlockDevice - PDisk Hardware abstraction layer
@@ -28,7 +30,7 @@ public:
     virtual ~IBlockDevice()
     {};
     // Initialization methods
-    virtual void Initialize(std::shared_ptr<TPDiskCtx> pdiskCtx) = 0;
+    virtual void Initialize(TActorSystem *actorSystem, const TActorId &pdiskActor) = 0;
     virtual bool IsGood() = 0;
     virtual int GetLastErrno() = 0;
 
@@ -58,16 +60,27 @@ public:
     virtual void SetWriteCache(bool isEnable) = 0;
     virtual void Stop() = 0;
     virtual TString DebugInfo() = 0;
+    virtual TFileHandle* GetFileHandle() = 0;  // Get file handle for sharing with DDisk workers
 };
 
 class TPDisk;
 
-IBlockDevice* CreateRealBlockDevice(const TString &path, TPDiskMon &mon,
+IBlockDevice* CreateRealBlockDevice(const TString &path, ui32 pDiskId, TPDiskMon &mon,
         ui64 reorderingCycles, ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags,
-        ui32 maxQueuedCompletionActions, ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap,
-        TPDisk * const pdisk = nullptr, bool readOnly = false);
+        ui32 maxQueuedCompletionActions, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk = nullptr,
+        const TString &threadNamePrefix = "Pd");
 IBlockDevice* CreateRealBlockDeviceWithDefaults(const TString &path, TPDiskMon &mon, TDeviceMode::TFlags flags,
-        TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem, TPDisk * const pdisk = nullptr, bool readOnly = false);
+        TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem, TPDisk * const pdisk = nullptr,
+        const TString &threadNamePrefix = "Pd");
+
+// Factory functions that create RealBlockDevice with existing file handle (for DDisk workers)
+IBlockDevice* CreateRealBlockDeviceWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TPDiskMon &mon,
+        ui64 reorderingCycles, ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags,
+        ui32 maxQueuedCompletionActions, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk = nullptr,
+        const TString &threadNamePrefix = "Pd");
+IBlockDevice* CreateRealBlockDeviceWithFileDefaults(TFileHandle *fileHandle, const TString &path, TPDiskMon &mon,
+        TDeviceMode::TFlags flags, TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem,
+        TPDisk * const pdisk = nullptr, const TString &threadNamePrefix = "Pd");
 
 } // NPDisk
 } // NKikimr

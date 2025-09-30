@@ -13,6 +13,15 @@ std::unique_ptr<IAsyncIoContext> TIoContextFactoryOSS::CreateAsyncIoContext(cons
     }
 };
 
+std::unique_ptr<IAsyncIoContext> TIoContextFactoryOSS::CreateAsyncIoContextWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId,
+            TDeviceMode::TFlags flags, TIntrusivePtr<TSectorMap> sectorMap) const {
+    if (sectorMap) {
+        return CreateAsyncIoContextMapWithFile(fileHandle, path, pDiskId, sectorMap);
+    } else {
+        return CreateAsyncIoContextRealWithFile(fileHandle, path, pDiskId, flags);
+    }
+};
+
 ISpdkState *TIoContextFactoryOSS::CreateSpdkState() const {
     return Singleton<TSpdkStateOSS>();
 }

@@ -101,10 +101,7 @@ enum class EIoResult : i64 {
     // From kernel maillist: "this error is not fatal. One can fix it easily by rewriting affected sector"
     InvalidSequence = 14,       // aka EILSEQ:                  GetEvents
     // for broken disk's error-log: "READ_ERROR: The read data could not be recovered from the media"
-    NoData = 15,                // aka ENODATA:                 GetEvents
-    RemoteIOError = 16,         // aka EREMOTEIO:               GetEvents
-    NoSpaceLeft = 17,           // aka ENOSPC:                  GetEvents
-    NoDevice = 18,              // aka ENODEV:                  GetEvents
+    NoData = 15                 // aka ENODATA:                 GetEvents
 };
 
 struct TAsyncIoOperationResult {
@@ -139,8 +136,14 @@ public:
 std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextReal(const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags);
 std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextMap(const TString &path, ui32 pDiskId, TIntrusivePtr<TSectorMap> sectorMap);
 
+// Factory functions for creating AsyncIoContext with existing file handle (for DDisk workers)
+std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextRealWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags);
+std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextMapWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TIntrusivePtr<TSectorMap> sectorMap);
+
 struct IIoContextFactory {
     virtual std::unique_ptr<IAsyncIoContext> CreateAsyncIoContext(const TString &path, ui32 pDiskId,
+            TDeviceMode::TFlags flags, TIntrusivePtr<TSectorMap> sectorMap) const = 0;
+    virtual std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId,
             TDeviceMode::TFlags flags, TIntrusivePtr<TSectorMap> sectorMap) const = 0;
     virtual void DetectFileParameters(const TString &path, ui64 &outDiskSizeBytes, bool &outIsBlockDevice) const = 0;
     virtual ISpdkState *CreateSpdkState() const = 0;
@@ -150,6 +153,8 @@ struct IIoContextFactory {
 struct TIoContextFactoryOSS : IIoContextFactory {
     std::unique_ptr<IAsyncIoContext> CreateAsyncIoContext(const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags,
             TIntrusivePtr<TSectorMap> sectorMap) const override;
+    std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId,
+            TDeviceMode::TFlags flags, TIntrusivePtr<TSectorMap> sectorMap) const override;
 
     ISpdkState *CreateSpdkState() const override;
     void DetectFileParameters(const TString &path, ui64 &outDiskSizeBytes, bool &outIsBlockDevice) const override;
