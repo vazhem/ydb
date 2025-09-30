@@ -132,6 +132,7 @@ const std::unordered_map<TTabletTypes::EType, TString> TABLET_TYPE_SHORT_NAMES =
                                                                                   {TTabletTypes::Mediator, "M"},
                                                                                   {TTabletTypes::BlockStoreVolume, "BV"},
                                                                                   {TTabletTypes::BlockStorePartition2, "BP"},
+                                                                                  {TTabletTypes::BlockStorePartitionDirect, "BPD"},
                                                                                   {TTabletTypes::Kesus, "K"},
                                                                                   {TTabletTypes::SysViewProcessor, "SV"},
                                                                                   {TTabletTypes::FileStore, "FS"},

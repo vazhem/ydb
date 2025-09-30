@@ -157,7 +157,10 @@ public:
                 }
             }
 
-            if (volume->VolumeConfig.GetTabletVersion() == 2) {
+            if (volume->VolumeConfig.GetStorageMediaKind() == 10) {
+                // STORAGE_MEDIA_SSD_DIRECT
+                txState.Shards.emplace_back(shardIdx, ETabletType::BlockStorePartitionDirect, partitionOp);
+            } else if (volume->VolumeConfig.GetTabletVersion() == 2) {
                 txState.Shards.emplace_back(shardIdx, ETabletType::BlockStorePartition2, partitionOp);
             } else {
                 txState.Shards.emplace_back(shardIdx, ETabletType::BlockStorePartition, partitionOp);
@@ -167,7 +170,11 @@ public:
         // create new shards
         for (ui64 i = 0; i < shardsToCreate; ++i) {
             TShardIdx shardIdx;
-            if (volume->VolumeConfig.GetTabletVersion() == 2) {
+            if (volume->VolumeConfig.GetStorageMediaKind() == 10) {
+                // STORAGE_MEDIA_SSD_DIRECT
+                shardIdx = context.SS->RegisterShardInfo(TShardInfo::BlockStorePartitionDirectInfo(txId, pathId));
+                context.SS->TabletCounters->Simple()[COUNTER_BLOCKSTORE_PARTITION_DIRECT_SHARD_COUNT].Add(1);
+            } else if (volume->VolumeConfig.GetTabletVersion() == 2) {
                 shardIdx = context.SS->RegisterShardInfo(TShardInfo::BlockStorePartition2Info(txId, pathId));
                 context.SS->TabletCounters->Simple()[COUNTER_BLOCKSTORE_PARTITION2_SHARD_COUNT].Add(1);
             } else {

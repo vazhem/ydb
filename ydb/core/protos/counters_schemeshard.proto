@@ -270,6 +270,8 @@ enum ESimpleCounters {
     COUNTER_IN_FLIGHT_OPS_TxCreateStreamingQuery = 210 [(CounterOpts) = {Name: "InFlightOps/CreateStreamingQuery"}];
     COUNTER_IN_FLIGHT_OPS_TxDropStreamingQuery = 211   [(CounterOpts) = {Name: "InFlightOps/DropStreamingQuery"}];
     COUNTER_IN_FLIGHT_OPS_TxAlterStreamingQuery = 212  [(CounterOpts) = {Name: "InFlightOps/AlterStreamingQuery"}];
+
+    COUNTER_BLOCKSTORE_PARTITION_DIRECT_SHARD_COUNT = 213 [(CounterOpts) = {Name: "BlockStorePartitionDirectShards"}];
 }
 
 enum ECumulativeCounters {
