@@ -285,6 +285,7 @@ struct TChunkState {
     std::atomic<bool> IsDirty;
     ui64 CommitsInProgress;
     ui64 ShredGeneration;
+    bool IsRawChunk;
     TChunkState()
         : Nonce(0)
         , CurrentNonce(0)
@@ -295,6 +296,7 @@ struct TChunkState {
         , IsDirty(false)
         , CommitsInProgress(0)
         , ShredGeneration(0)
+        , IsRawChunk(false)
     {}
 
     bool HasAnyOperationsInProgress() const {

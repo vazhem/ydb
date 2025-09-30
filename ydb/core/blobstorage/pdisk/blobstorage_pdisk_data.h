@@ -22,6 +22,7 @@ const ui64 MagicLogChunkId = 0x11170915A71FE111;
 const ui64 MagicDataChunkId = 0xDA7AC8A2CDA7AC8A;
 const ui64 MagicSysLogChunkId = 0x5957095957095957;
 const ui64 MagicFormatChunkId = 0xF088A7F088A7F088;
+const ui64 MagicRawChunkId = 0x4B004B004B004B00;
 constexpr ui64 MagicIncompleteFormat = 0x5b48add808b31984;
 constexpr ui64 MagicIncompleteFormatSize = 512; // Bytes
 constexpr ui64 MagicMetadataFormatSector = 0xb5bf641dbca863d2;
@@ -599,6 +600,7 @@ struct TDiskFormat {
     ui64 MagicDataChunk;
     ui64 MagicSysLogChunk;
     ui64 MagicFormatChunk;
+    ui64 MagicRawChunk;
 
     ui32 ChunkSize;
     ui32 SectorSize;
@@ -785,11 +787,14 @@ struct TDiskFormat {
         MagicDataChunk = hash.GetHashResult();
         hash.Hash(&MagicSysLogChunkId, sizeof(MagicSysLogChunkId));
         MagicSysLogChunk = hash.GetHashResult();
+        hash.Hash(&MagicRawChunkId, sizeof(MagicRawChunkId));
+        MagicRawChunk = hash.GetHashResult();
 
         PrepareMagic(LogKey, (ui64)-1, MagicNextLogChunkReference);
         PrepareMagic(LogKey , (ui64)-2, MagicLogChunk);
         PrepareMagic(ChunkKey , (ui64)-1, MagicDataChunk);
         PrepareMagic(SysLogKey , (ui64)-1, MagicSysLogChunk);
+        PrepareMagic(ChunkKey , (ui64)-2, MagicRawChunk);
     }
 
     ui64 GetUsedSize() const {

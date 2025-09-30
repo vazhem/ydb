@@ -340,7 +340,7 @@ public:
     void ChunkUnlock(TChunkUnlock &evChunkUnlock);
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Chunk reservation
-    TVector<TChunkIdx> AllocateChunkForOwner(const TRequestBase *req, const ui32 count, TString &errorReason);
+    TVector<TChunkIdx> AllocateChunkForOwner(const TRequestBase *req, const ui32 count, TString &errorReason, bool useRawChunk = false);
     void ChunkReserve(TChunkReserve &evChunkReserve);
     bool ValidateForgetChunk(ui32 chunkIdx, TOwner owner, TStringStream& outErrorReason);
     void ChunkForget(TChunkForget &evChunkForget);
