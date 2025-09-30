@@ -9,6 +9,8 @@
 #include <ydb/core/blobstorage/groupinfo/blobstorage_groupinfo.h>
 #include <ydb/core/blobstorage/vdisk/common/vdisk_pdiskctx.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk.h>
+#include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_blockdevice.h>
+#include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_completion.h>
 
 #include <util/generic/hash.h>
 #include <util/generic/queue.h>
@@ -52,10 +54,12 @@ private:
         ui64 Cookie;
         bool IsWrite;
         TString WriteData;  // For write requests
+        ui64 OriginalRequestId;  // Original request ID for traceability
+        bool IsDirectIO;  // Flag to track if this is a DirectIO request
 
         TPendingRequest() = default;
-        TPendingRequest(ui32 offset, ui32 size, ui32 chunkId, TActorId sender, ui64 cookie, bool isWrite, const TString& writeData = "")
-            : Offset(offset), Size(size), ChunkId(chunkId), Sender(sender), Cookie(cookie), IsWrite(isWrite), WriteData(writeData) {}
+        TPendingRequest(ui32 offset, ui32 size, ui32 chunkId, TActorId sender, ui64 cookie, bool isWrite, const TString& writeData = "", ui64 originalRequestId = 0, bool isDirectIO = false)
+            : Offset(offset), Size(size), ChunkId(chunkId), Sender(sender), Cookie(cookie), IsWrite(isWrite), WriteData(writeData), OriginalRequestId(originalRequestId), IsDirectIO(isDirectIO) {}
     };
 
     THashMap<void*, TPendingRequest> PendingRequests;
@@ -77,6 +81,114 @@ private:
     // Current chunk allocation state
     bool ChunkReservationInProgress;
     ui32 ChunksPerReservation;
+
+    // IN-MEMORY STORAGE IMPLEMENTATION FOR DEBUGGING
+    // This bypasses PDisk entirely to isolate corruption issues
+    bool UseInMemoryStorage = false;
+
+    // In-memory chunk data structure
+    struct TChunkData {
+        TString Data;
+
+        TChunkData() = default;
+        TChunkData(const TString& data) : Data(data) {}
+
+        TString ReadData(ui32 offset, ui32 size) const {
+            if (offset >= Data.size()) {
+                return TString(size, '\0');
+            }
+            ui32 availableSize = Min(size, static_cast<ui32>(Data.size()) - offset);
+            return Data.substr(offset, availableSize) + TString(size - availableSize, '\0');
+        }
+
+        void WriteData(ui32 offset, const TString& data) {
+            if (offset + data.size() > Data.size()) {
+                Data.resize(offset + data.size());
+            }
+            memcpy(const_cast<char*>(Data.data()) + offset, data.data(), data.size());
+        }
+    };
+
+    THashMap<ui32, TChunkData> InMemoryChunks;
+
+    // DDiskWriter Direct Device I/O (bypasses PDisk)
+    TActorId DDiskWriterId;
+    TString DevicePath;
+    bool UseDirectDeviceIO = true;  // Use direct device I/O instead of PDisk
+    NPDisk::IBlockDevice* BlockDevice = nullptr;  // PDisk's block device interface for direct I/O
+
+
+    // Chunk reservation info from PDisk (for device access)
+    struct TChunkInfo {
+        ui64 DeviceOffset;  // Physical offset on device
+        bool IsReserved;
+
+        TChunkInfo() : DeviceOffset(0), IsReserved(false) {}
+        TChunkInfo(ui64 offset) : DeviceOffset(offset), IsReserved(true) {}
+    };
+    THashMap<ui32, TChunkInfo> ChunkInfoMap;  // chunkId -> device offset
+
+    // Simple direct I/O completion handler that doesn't interfere with PDisk buffer management
+    class TDirectIOCompletion : public NPDisk::TCompletionAction {
+    private:
+        TActorId DDiskActorId;  // DDisk actor ID for logging
+        TActorId OriginalSender;  // The original request sender
+        ui64 OriginalCookie;     // The original request cookie
+        ui64 RequestId;          // The request ID for traceability
+        TChunkIdx ChunkIdx;
+        ui32 OriginalOffset;
+        ui32 OriginalSize;
+        ui32 OffsetAdjustment;
+        bool IsRead;
+        char* AlignedBuffer;  // Simple aligned buffer using aligned_alloc
+        ui32 AlignedSize;
+        mutable std::atomic<bool> ExecutedOrReleased{false};
+
+    public:
+        TDirectIOCompletion(const TActorId& ddiskActorId, const TActorId& originalSender,
+                           ui64 originalCookie, ui64 requestId, TChunkIdx chunkIdx, ui32 originalOffset,
+                           ui32 originalSize, ui32 offsetAdjustment, bool isRead,
+                           char* alignedBuffer, ui32 alignedSize, const NWilson::TTraceId& traceId = {})
+            : DDiskActorId(ddiskActorId)
+            , OriginalSender(originalSender)
+            , OriginalCookie(originalCookie)
+            , RequestId(requestId)
+            , ChunkIdx(chunkIdx)
+            , OriginalOffset(originalOffset)
+            , OriginalSize(originalSize)
+            , OffsetAdjustment(offsetAdjustment)
+            , IsRead(isRead)
+            , AlignedBuffer(alignedBuffer)
+            , AlignedSize(alignedSize)
+        {
+            // Initialize base class TCompletionAction fields
+            OperationIdx = 0;  // Will be set by PDisk when operation is scheduled
+            SubmitTime = 0;
+            FlushAction = nullptr;
+            CostNs = 0;
+            Result = NPDisk::EIoResult::Unknown;
+            ErrorReason = "";
+            TraceId = NWilson::TTraceId(traceId);
+        }
+
+        virtual ~TDirectIOCompletion() {
+            if (AlignedBuffer) {
+                free(AlignedBuffer);
+                AlignedBuffer = nullptr;
+            }
+        }
+
+        char* Data() const { return AlignedBuffer; }
+        ui32 Size() const { return AlignedSize; }
+
+        bool CanHandleResult() const override {
+            // Always handle result, even for errors - we want to send responses
+            return true;
+        }
+
+        void Exec(TActorSystem* actorSystem) override;
+        void Release(TActorSystem* actorSystem) override;
+    };
 
 public:
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
@@ -103,6 +215,11 @@ public:
 private:
     STFUNC(StateWork)
     {
+        LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
+            "🔥 DDISK STATEWORK: Received event type=" << ev->GetTypeRewrite()
+            << " sender=" << ev->Sender.ToString()
+            << " cookie=" << ev->Cookie);
+
         switch (ev->GetTypeRewrite()) {
             HFunc(TEvBlobStorage::TEvDDiskReadRequest, HandleReadRequest);
             HFunc(TEvBlobStorage::TEvDDiskWriteRequest, HandleWriteRequest);
