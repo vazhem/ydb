@@ -1429,6 +1429,9 @@ void TPDisk::ChunkReserve(TChunkReserve &evChunkReserve) {
         result->StatusFlags = GetStatusFlags(evChunkReserve.Owner, evChunkReserve.OwnerGroupType);
     }
 
+    // Copy the cookie from the original request
+    result->Cookie = evChunkReserve.Cookie;
+
     guard.Release();
     PCtx->ActorSystem->Send(evChunkReserve.Sender, result.Release());
     Mon.ChunkReserve.CountResponse();

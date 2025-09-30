@@ -7,8 +7,11 @@
 #include <ydb/core/blobstorage/vdisk/common/vdisk_config.h>
 #include <ydb/core/blobstorage/ddisk/ddisk_events.h>
 #include <ydb/core/blobstorage/groupinfo/blobstorage_groupinfo.h>
+#include <ydb/core/blobstorage/vdisk/common/vdisk_pdiskctx.h>
+#include <ydb/core/blobstorage/pdisk/blobstorage_pdisk.h>
 
 #include <util/generic/hash.h>
+#include <util/generic/queue.h>
 
 namespace NKikimr {
 
@@ -31,9 +34,49 @@ private:
     TIntrusivePtr<TVDiskConfig> Config;
     TIntrusivePtr<TBlobStorageGroupInfo> GInfo;
     TVDiskID SelfVDiskId;
+    TPDiskCtxPtr PDiskCtx;
 
-    // Simple in-memory storage for testing
-    THashMap<ui64, TString> Data;
+    // PDisk initialization
+    bool PDiskInitialized;
+    ui32 ChunkSize;  // PDisk chunk size received during initialization
+
+    // Chunk management - track owned chunks for validation
+    THashSet<ui32> KnownChunks;
+
+    // Pending operations
+    struct TPendingRequest {
+        ui32 Offset;  // ui32 for chunk-relative offset
+        ui32 Size;
+        ui32 ChunkId;
+        TActorId Sender;
+        ui64 Cookie;
+        bool IsWrite;
+        TString WriteData;  // For write requests
+
+        TPendingRequest() = default;
+        TPendingRequest(ui32 offset, ui32 size, ui32 chunkId, TActorId sender, ui64 cookie, bool isWrite, const TString& writeData = "")
+            : Offset(offset), Size(size), ChunkId(chunkId), Sender(sender), Cookie(cookie), IsWrite(isWrite), WriteData(writeData) {}
+    };
+
+    THashMap<void*, TPendingRequest> PendingRequests;
+    ui64 NextRequestCookie = 1;  // Incrementing counter for unique cookies
+
+    // Pending chunk reservation requests
+    struct TPendingChunkReservation {
+        TActorId Sender;
+        ui64 Cookie;
+        ui32 ChunkCount;
+
+        TPendingChunkReservation() = default;
+        TPendingChunkReservation(TActorId sender, ui64 cookie, ui32 chunkCount)
+            : Sender(sender), Cookie(cookie), ChunkCount(chunkCount) {}
+    };
+
+    THashMap<void*, TPendingChunkReservation> PendingReservations;
+
+    // Current chunk allocation state
+    bool ChunkReservationInProgress;
+    ui32 ChunksPerReservation;
 
 public:
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
@@ -46,6 +89,11 @@ public:
         const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters)
         : Config(std::move(cfg))
         , GInfo(std::move(info))
+        , PDiskCtx(nullptr)
+        , PDiskInitialized(false)
+        , ChunkSize(0)  // Will be set during PDisk initialization
+        , ChunkReservationInProgress(false)
+        , ChunksPerReservation(10)  // Reserve chunks in batches
     {
         Y_UNUSED(counters);
     }
@@ -58,6 +106,11 @@ private:
         switch (ev->GetTypeRewrite()) {
             HFunc(TEvBlobStorage::TEvDDiskReadRequest, HandleReadRequest);
             HFunc(TEvBlobStorage::TEvDDiskWriteRequest, HandleWriteRequest);
+            HFunc(TEvBlobStorage::TEvDDiskReserveChunksRequest, HandleReserveChunksRequest);
+            HFunc(NPDisk::TEvYardInitResult, HandleYardInitResult);
+            HFunc(NPDisk::TEvChunkReserveResult, HandleChunkReserveResult);
+            HFunc(NPDisk::TEvChunkReadResult, HandleChunkReadResult);
+            HFunc(NPDisk::TEvChunkWriteResult, HandleChunkWriteResult);
 
             CFunc(NActors::TEvents::TSystem::PoisonPill, Die);
 
@@ -74,6 +127,34 @@ private:
     void HandleWriteRequest(
         const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
         const NActors::TActorContext& ctx);
+
+    void HandleReserveChunksRequest(
+        const TEvBlobStorage::TEvDDiskReserveChunksRequest::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleChunkReserveResult(
+        const NPDisk::TEvChunkReserveResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleChunkReadResult(
+        const NPDisk::TEvChunkReadResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleChunkWriteResult(
+        const NPDisk::TEvChunkWriteResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleYardInitResult(
+        const NPDisk::TEvYardInitResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    // Helper methods
+    void InitializePDisk(const NActors::TActorContext& ctx);
+    // Helper methods for chunk management (legacy - kept for backwards compatibility)
+    void EnsureChunksAvailable(const NActors::TActorContext& ctx);
+
+    // Helper methods for error handling
+    void SendErrorResponse(const TPendingRequest& request, const TString& errorReason, const NActors::TActorContext& ctx);
 };
 
 }   // namespace NKikimr

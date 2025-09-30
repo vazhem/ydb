@@ -1581,16 +1581,30 @@ message TEvControllerDistconfResponse {
     optional uint64 ExpectedStorageConfigVersion = 6;
 }
 
-// DDisk direct operation messages (offset/size based)
+// DDisk chunk reservation messages
+message TEvDDiskReserveChunksRequest {
+    optional uint32 ChunkCount = 1;  // Number of chunks to reserve
+}
+
+message TEvDDiskReserveChunksResponse {
+    optional NKikimrProto.EReplyStatus Status = 1;
+    optional string ErrorReason = 2;
+    repeated uint32 ChunkIds = 3;  // Reserved chunk IDs
+    optional uint32 ChunkSize = 4;  // PDisk chunk size in bytes
+}
+
+// DDisk direct operation messages (chunk-based)
 message TEvDDiskReadRequest {
     optional uint64 Offset = 1;
     optional uint32 Size = 2;
+    optional uint32 ChunkId = 3;  // Chunk ID where to read from
 }
 
 message TEvDDiskWriteRequest {
     optional uint64 Offset = 1;
     optional uint32 Size = 2;
     optional bytes Data = 3;
+    optional uint32 ChunkId = 4;  // Chunk ID where to write to
 }
 
 message TEvDDiskReadResponse {

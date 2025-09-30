@@ -965,6 +965,8 @@ struct TEvBlobStorage {
         EvDDiskWriteRequest,
         EvDDiskReadResponse,
         EvDDiskWriteResponse,
+        EvDDiskReserveChunksRequest,
+        EvDDiskReserveChunksResponse,
 
         EvEnd
     };
@@ -2801,6 +2803,8 @@ struct TEvBlobStorage {
     struct TEvDDiskWriteRequest;
     struct TEvDDiskReadResponse;
     struct TEvDDiskWriteResponse;
+    struct TEvDDiskReserveChunksRequest;
+    struct TEvDDiskReserveChunksResponse;
 
     struct TEvConfigureProxy;
     struct TEvUpdateGroupInfo;

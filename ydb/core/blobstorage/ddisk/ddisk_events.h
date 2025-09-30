@@ -105,4 +105,52 @@ namespace NKikimr {
         }
     };
 
+    struct TEvBlobStorage::TEvDDiskReserveChunksRequest : TEventPB<
+        TEvBlobStorage::TEvDDiskReserveChunksRequest,
+        NKikimrBlobStorage::TEvDDiskReserveChunksRequest,
+        TEvBlobStorage::EvDDiskReserveChunksRequest>
+    {
+        TEvDDiskReserveChunksRequest() = default;
+
+        TEvDDiskReserveChunksRequest(ui32 chunkCount) {
+            Record.SetChunkCount(chunkCount);
+        }
+
+        TString ToString() const override {
+            TStringStream str;
+            str << "TEvDDiskReserveChunksRequest {ChunkCount# " << Record.GetChunkCount() << "}";
+            return str.Str();
+        }
+    };
+
+    struct TEvBlobStorage::TEvDDiskReserveChunksResponse : TEventPB<
+        TEvBlobStorage::TEvDDiskReserveChunksResponse,
+        NKikimrBlobStorage::TEvDDiskReserveChunksResponse,
+        TEvBlobStorage::EvDDiskReserveChunksResponse>
+    {
+        TEvDDiskReserveChunksResponse() = default;
+
+        TEvDDiskReserveChunksResponse(NKikimrProto::EReplyStatus status, const TString& reason = "") {
+            Record.SetStatus(status);
+            if (!reason.empty()) {
+                Record.SetErrorReason(reason);
+            }
+        }
+
+        TString ToString() const override {
+            TStringStream str;
+            str << "TEvDDiskReserveChunksResponse {Status# " << NKikimrProto::EReplyStatus_Name(Record.GetStatus()).data();
+            if (!Record.GetErrorReason().empty()) {
+                str << " ErrorReason# \"" << Record.GetErrorReason() << "\"";
+            }
+            str << " ChunkIds# [";
+            for (int i = 0; i < static_cast<int>(Record.ChunkIdsSize()); ++i) {
+                if (i > 0) str << ", ";
+                str << Record.GetChunkIds(i);
+            }
+            str << "]}";
+            return str.Str();
+        }
+    };
+
 } // namespace NKikimr

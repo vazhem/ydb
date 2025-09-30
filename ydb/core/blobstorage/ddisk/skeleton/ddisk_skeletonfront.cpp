@@ -49,7 +49,8 @@ namespace NKikimr {
     IActor* CreateDDiskSkeletonFront(const TIntrusivePtr<TVDiskConfig> &cfg,
                                      const TIntrusivePtr<TBlobStorageGroupInfo> &info,
                                      const TIntrusivePtr<::NMonitoring::TDynamicCounters> &counters) {
-        // Use the proper DDisk actor implementation for ErasureMirror3Direct
+        // DDisk will initialize PDisk connection during Bootstrap via TEvYardInit
+        // No need to create mock PDisk context - it will be established dynamically
         return new TDDiskActorImpl(cfg, info, counters);
     }
 
