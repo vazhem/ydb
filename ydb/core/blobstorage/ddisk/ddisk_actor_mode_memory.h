@@ -48,6 +48,16 @@ protected:
     void ProcessWriteRequest(
         const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
         const NActors::TActorContext& ctx) override;
+
+private:
+    // Override base class handlers to avoid forwarding to workers for memory mode
+    void HandleReadRequest(
+        const TEvBlobStorage::TEvDDiskReadRequest::TPtr& ev,
+        const NActors::TActorContext& ctx) override;
+
+    void HandleWriteRequest(
+        const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
+        const NActors::TActorContext& ctx) override;
 };
 
 }   // namespace NKikimr

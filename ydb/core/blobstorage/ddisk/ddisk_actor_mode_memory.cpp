@@ -140,4 +140,24 @@ void TDDiskMemoryActor::ProcessWriteRequest(
     NextRequestCookie++;
 }
 
+void TDDiskMemoryActor::HandleReadRequest(
+    const TEvBlobStorage::TEvDDiskReadRequest::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    // For memory mode, always handle requests directly in main actor, never forward to workers
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "TDDiskMemoryActor: Handling read request directly in main actor (no worker forwarding)");
+    ProcessReadRequest(ev, ctx);
+}
+
+void TDDiskMemoryActor::HandleWriteRequest(
+    const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    // For memory mode, always handle requests directly in main actor, never forward to workers
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "TDDiskMemoryActor: Handling write request directly in main actor (no worker forwarding)");
+    ProcessWriteRequest(ev, ctx);
+}
+
 }   // namespace NKikimr

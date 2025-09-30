@@ -469,12 +469,12 @@ void TDDiskActorImpl::TransitionToReady(const NActors::TActorContext& ctx)
 void TDDiskActorImpl::CreateWorkerPool(const NActors::TActorContext& ctx)
 {
     LOG_INFO_S(ctx, NKikimrServices::BS_DDISK,
-        "DDiskActorImpl: Creating worker pool with " << DEFAULT_WORKER_COUNT << " workers");
+        "DDiskActorImpl: Creating worker pool with " << WorkerCount << " workers");
 
     // Create worker config with thread-safe data
     TDDiskWorkerConfig config = CreateWorkerConfig();
 
-    for (ui32 i = 0; i < DEFAULT_WORKER_COUNT; ++i) {
+    for (ui32 i = 0; i < WorkerCount; ++i) {
         auto worker = std::unique_ptr<NActors::IActor>(CreateDDiskWorkerActor(i, config));
         TActorId workerId = ctx.RegisterWithSameMailbox(worker.release());
         WorkerActors.push_back(workerId);

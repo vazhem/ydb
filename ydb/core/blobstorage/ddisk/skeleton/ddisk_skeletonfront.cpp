@@ -3,6 +3,7 @@
 #include <ydb/core/blobstorage/vdisk/common/vdisk_context.h>
 #include <ydb/core/blobstorage/groupinfo/blobstorage_groupinfo.h>
 #include <ydb/core/blobstorage/ddisk/ddisk_actor_impl.h>
+#include <util/system/env.h>
 
 using namespace NKikimrServices;
 
@@ -52,11 +53,24 @@ namespace NKikimr {
         // DDisk will initialize PDisk connection during Bootstrap via TEvYardInit
         // No need to create mock PDisk context - it will be established dynamically
 
-        // Determine the mode based on configuration or environment
-        // For now, default to DIRECT_IO mode, but this can be made configurable
-        TDDiskActorImpl::EDDiskMode mode = TDDiskActorImpl::EDDiskMode::DIRECT_IO;
+        // Determine the mode based on environment variable
+        TDDiskActorImpl::EDDiskMode mode;
+        TString ddiskMode = GetEnv("DDISK_MODE");
 
-        // TODO: Make mode configurable
+        if (ddiskMode == "MEMORY") {
+            mode = TDDiskActorImpl::EDDiskMode::MEMORY;
+        } else if (ddiskMode == "PDISK_EVENTS") {
+            mode = TDDiskActorImpl::EDDiskMode::PDISK_EVENTS;
+        } else if (ddiskMode == "DIRECT_IO") {
+            mode = TDDiskActorImpl::EDDiskMode::DIRECT_IO;
+        } else {
+            // Default to DIRECT_IO if not specified or invalid
+            mode = TDDiskActorImpl::EDDiskMode::DIRECT_IO;
+        }
+
+        // Log the selected mode
+        LOG_INFO_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
+            "Using DDisk mode: " << mode);
         // Create the appropriate instance using the factory method
         return TDDiskActorImpl::Create(cfg, info, mode, counters).release();
     }

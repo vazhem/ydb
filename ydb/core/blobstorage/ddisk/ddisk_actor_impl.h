@@ -61,9 +61,10 @@ protected:
     TString DevicePath;
 
     // Worker pool management
-    static constexpr ui32 DEFAULT_WORKER_COUNT = 32;
+    static constexpr ui32 DEFAULT_WORKER_COUNT = 1;
     TVector<TActorId> WorkerActors;
     ui32 NextWorkerIndex;
+    ui32 WorkerCount = 1;  // Configurable via DDISK_WORKER_COUNT env var
 
     // Chunk management - track owned chunks for validation
     THashSet<ui32> KnownChunks;
@@ -115,6 +116,20 @@ public:
 
     EDDiskMode Mode;
 
+    // Output operator for EDDiskMode
+    friend IOutputStream& operator<<(IOutputStream& out, EDDiskMode mode) {
+        switch (mode) {
+            case EDDiskMode::MEMORY:
+                return out << "Memory";
+            case EDDiskMode::PDISK_EVENTS:
+                return out << "PDisk Events";
+            case EDDiskMode::DIRECT_IO:
+                return out << "Direct IO";
+            default:
+                return out << "Unknown";
+        }
+    }
+
     // Chunk reservation info from PDisk (for device access)
     struct TChunkInfo {
         ui64 DeviceOffset;  // Physical offset on device
@@ -152,11 +167,36 @@ public:
         , ChunkSize(0)  // Will be set during PDisk initialization
         , BlockDevice(nullptr)  // Will be set during PDisk initialization for DIRECT_IO mode
         , NextWorkerIndex(0)
+        , WorkerCount(DEFAULT_WORKER_COUNT)
         , ChunkReservationInProgress(false)
         , ChunksPerReservation(10)  // Reserve chunks in batches
         , Mode(mode)
     {
         Y_UNUSED(counters);
+
+        // Read worker count from environment variable
+        const char* workerCountEnv = getenv("DDISK_WORKER_COUNT");
+        if (workerCountEnv) {
+            try {
+                ui32 envWorkerCount = std::stoul(workerCountEnv);
+                if (envWorkerCount > 0) {
+                    WorkerCount = envWorkerCount;
+                    LOG_INFO_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
+                        "Using worker count from environment: " << WorkerCount);
+                } else {
+                    LOG_WARN_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
+                        "Invalid worker count in environment: " << workerCountEnv
+                        << " (must be > 0), using default: " << DEFAULT_WORKER_COUNT);
+                }
+            } catch (const std::exception& e) {
+                LOG_WARN_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
+                    "Failed to parse worker count from environment: " << workerCountEnv
+                    << " error: " << e.what() << ", using default: " << DEFAULT_WORKER_COUNT);
+            }
+        } else {
+            LOG_INFO_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
+                "No worker count environment variable set, using default: " << DEFAULT_WORKER_COUNT);
+        }
     }
 
     void Bootstrap(const NActors::TActorContext& ctx);
@@ -229,11 +269,11 @@ private:
         }
     }
 
-    void HandleReadRequest(
+    virtual void HandleReadRequest(
         const TEvBlobStorage::TEvDDiskReadRequest::TPtr& ev,
         const NActors::TActorContext& ctx);
 
-    void HandleWriteRequest(
+    virtual void HandleWriteRequest(
         const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
         const NActors::TActorContext& ctx);
 };
