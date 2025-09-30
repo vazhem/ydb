@@ -960,6 +960,12 @@ struct TEvBlobStorage {
         EvIncrHugeReadLogResult,
         EvIncrHugeScanResult,
 
+        // DDisk events for direct operations (offset/size based)
+        EvDDiskReadRequest,
+        EvDDiskWriteRequest,
+        EvDDiskReadResponse,
+        EvDDiskWriteResponse,
+
         EvEnd
     };
 
@@ -2789,6 +2795,12 @@ struct TEvBlobStorage {
             return Print(false);
         }
     };
+
+    // DDisk events are defined in ddisk_events.h
+    struct TEvDDiskReadRequest;
+    struct TEvDDiskWriteRequest;
+    struct TEvDDiskReadResponse;
+    struct TEvDDiskWriteResponse;
 
     struct TEvConfigureProxy;
     struct TEvUpdateGroupInfo;

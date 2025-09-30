@@ -2,6 +2,7 @@ LIBRARY()
 
 SRCS(
     ddisk_actor.cpp
+    ddisk_actor_impl.cpp
     skeleton/ddisk_skeletonfront.cpp
 )
 

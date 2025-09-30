@@ -2,6 +2,7 @@
 #include <ydb/core/blobstorage/base/blobstorage_events.h>
 #include <ydb/core/blobstorage/vdisk/common/vdisk_context.h>
 #include <ydb/core/blobstorage/groupinfo/blobstorage_groupinfo.h>
+#include <ydb/core/blobstorage/ddisk/ddisk_actor_impl.h>
 
 using namespace NKikimrServices;
 
@@ -48,7 +49,8 @@ namespace NKikimr {
     IActor* CreateDDiskSkeletonFront(const TIntrusivePtr<TVDiskConfig> &cfg,
                                      const TIntrusivePtr<TBlobStorageGroupInfo> &info,
                                      const TIntrusivePtr<::NMonitoring::TDynamicCounters> &counters) {
-        return new TDDiskSkeletonFront(cfg, info, counters);
+        // Use the proper DDisk actor implementation for ErasureMirror3Direct
+        return new TDDiskActorImpl(cfg, info, counters);
     }
 
 } // NKikimr

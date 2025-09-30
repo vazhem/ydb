@@ -204,6 +204,15 @@ namespace NKikimr {
                 // create VSlots
                 CreateVSlotsForGroup(groupInfo, group, {});
 
+                // Log the created group ID
+                STLOG(PRI_INFO, BS_CONTROLLER, BSCFG01, "Created new group",
+                    (GroupId, groupId),
+                    (StoragePoolId, StoragePoolId),
+                    (ErasureSpecies, StoragePool.ErasureSpecies),
+                    (NumFailRealms, Geometry.GetNumFailRealms()),
+                    (NumFailDomainsPerFailRealm, Geometry.GetNumFailDomainsPerFailRealm()),
+                    (NumVDisksPerFailDomain, Geometry.GetNumVDisksPerFailDomain()));
+
                 return groupId;
             }
 

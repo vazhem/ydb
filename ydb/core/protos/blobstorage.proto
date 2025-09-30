@@ -1580,3 +1580,28 @@ message TEvControllerDistconfResponse {
     optional uint64 ExpectedMainConfigVersion = 5;
     optional uint64 ExpectedStorageConfigVersion = 6;
 }
+
+// DDisk direct operation messages (offset/size based)
+message TEvDDiskReadRequest {
+    optional uint64 Offset = 1;
+    optional uint32 Size = 2;
+}
+
+message TEvDDiskWriteRequest {
+    optional uint64 Offset = 1;
+    optional uint32 Size = 2;
+    optional bytes Data = 3;
+}
+
+message TEvDDiskReadResponse {
+    optional uint64 Offset = 1;
+    optional uint32 Size = 2;
+    optional bytes Data = 3;
+    optional bool Success = 4;
+    optional string ErrorReason = 5;
+}
+
+message TEvDDiskWriteResponse {
+    optional bool Success = 1;
+    optional string ErrorReason = 2;
+}
