@@ -3,6 +3,7 @@
 
 #include <ydb/core/blobstorage/crypto/default.h>
 #include <ydb/core/blobstorage/vdisk/vdisk_actor.h>
+#include <ydb/core/blobstorage/ddisk/ddisk_actor.h>
 
 #include <util/string/split.h>
 
@@ -267,7 +268,18 @@ namespace NKikimr::NStorage {
 
         // create an actor
         auto *as = TActivationContext::ActorSystem();
-        TActorId actorId = as->Register(CreateVDisk(vdiskConfig, groupInfo, AppData()->Counters),
+        // register ddisk actor instead of vdisk actor for mirror3direct erasure groups
+        IActor* actor;
+        if (groupInfo->Type.GetErasure() == TBlobStorageGroupType::ErasureMirror3Direct) {
+            actor = CreateDDisk(vdiskConfig, groupInfo, AppData()->Counters);
+            LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::BS_CONTROLLER,
+            "StartLocalVDiskActor: created DDisk actor");
+        } else {
+            actor = CreateVDisk(vdiskConfig, groupInfo, AppData()->Counters);
+            LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::BS_CONTROLLER,
+            "StartLocalVDiskActor: created VDisk actor");
+        }
+        TActorId actorId = as->Register(actor,
             TMailboxType::Revolving, AppData()->SystemPoolId);
         as->RegisterLocalService(vdiskServiceId, actorId);
         VDiskIdByActor.try_emplace(actorId, vslotId);

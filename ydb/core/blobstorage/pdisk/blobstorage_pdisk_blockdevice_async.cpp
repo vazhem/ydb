@@ -121,7 +121,7 @@ class TRealBlockDevice : public IBlockDevice {
             , MaxQueuedActions(maxQueuedActions)
         {
             for (size_t i = 0; i < threadsCount; ++i) {
-                Threads.push_back(std::make_unique<TCompletionThread>(device, TStringBuilder() << "PdCmpl_" << i));
+                Threads.push_back(std::make_unique<TCompletionThread>(device, TStringBuilder() << device.ThreadNamePrefix << "Cmpl_" << i));
                 Threads.back()->Start();
             }
         }
@@ -285,8 +285,9 @@ class TRealBlockDevice : public IBlockDevice {
         {}
 
         static void* ThreadProc(void* _this) {
-            SetCurrentThreadName("PdSbmEv");
-            static_cast<TSubmitThread*>(_this)->Exec();
+            TSubmitThread* thread = static_cast<TSubmitThread*>(_this);
+            SetCurrentThreadName((thread->Device.ThreadNamePrefix + "SbmEv").c_str());
+            thread->Exec();
             return nullptr;
         }
 
@@ -391,8 +392,9 @@ class TRealBlockDevice : public IBlockDevice {
         {}
 
         static void* ThreadProc(void* _this) {
-            SetCurrentThreadName("PdGetEv");
-            static_cast<TGetThread*>(_this)->Exec();
+            TGetThread* thread = static_cast<TGetThread*>(_this);
+            SetCurrentThreadName((thread->Device.ThreadNamePrefix + "GetEv").c_str());
+            thread->Exec();
             return nullptr;
         }
 
@@ -589,8 +591,9 @@ class TRealBlockDevice : public IBlockDevice {
         {}
 
         static int ThreadProcSpdk(void* _this) {
-            SetCurrentThreadName("PdSbmGet");
-            static_cast<TSubmitGetThread*>(_this)->Exec();
+            TSubmitGetThread* thread = static_cast<TSubmitGetThread*>(_this);
+            SetCurrentThreadName((thread->Device.ThreadNamePrefix + "SbmGet").c_str());
+            thread->Exec();
             return 0;
         }
 
@@ -746,8 +749,9 @@ class TRealBlockDevice : public IBlockDevice {
         {}
 
         static void* ThreadProc(void* _this) {
-            SetCurrentThreadName("PdTrim");
-            static_cast<TTrimThread*>(_this)->Exec();
+            TTrimThread* thread = static_cast<TTrimThread*>(_this);
+            SetCurrentThreadName((thread->Device.ThreadNamePrefix + "Trim").c_str());
+            thread->Exec();
             return nullptr;
         }
 
@@ -844,10 +848,14 @@ private:
 
     std::optional<TDriveData> DriveData;
 
+    TFileHandle *SharedFileHandle = nullptr;  // For DDisk workers using shared file handle
+    TString ThreadNamePrefix;  // Thread name prefix for worker threads
+
 public:
     TRealBlockDevice(const TString &path, TPDiskMon &mon, ui64 reorderingCycles,
             ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags, ui32 maxQueuedCompletionActions,
-            ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, bool readOnly)
+            ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, bool readOnly,
+            const TString &threadNamePrefix = "Pd")
         : Mon(mon)
         , Path(path)
         , CompletionThreads(nullptr)
@@ -869,6 +877,46 @@ public:
         , FlightControl(CountTrailingZeroBits(DeviceInFlight))
         , LastWarning(IsPowerOf2(deviceInFlight) ? "" : "Device inflight must be a power of 2")
         , ReadOnly(readOnly)
+        , SharedFileHandle(nullptr)
+        , ThreadNamePrefix(threadNamePrefix)
+    {
+        if (sectorMap) {
+            DriveData = TDriveData();
+            DriveData->Path = path;
+            DriveData->SerialNumber = sectorMap->Serial;
+            DriveData->FirmwareRevision = "rev 1.0";
+            DriveData->ModelNumber = "SectorMap";
+        }
+    }
+
+    // Constructor for DDisk workers that use shared file handle
+    TRealBlockDevice(TFileHandle *fileHandle, const TString &path, TPDiskMon &mon, ui64 reorderingCycles,
+            ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags, ui32 maxQueuedCompletionActions,
+            ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, bool readOnly,
+            const TString &threadNamePrefix = "Pd")
+        : Mon(mon)
+        , Path(path)
+        , CompletionThreads(nullptr)
+        , TrimThread(nullptr)
+        , GetEventsThread(nullptr)
+        , SharedCallback(nullptr)
+        , SubmitThread(nullptr)
+        , IsFileOpened(false)
+        , IsInitialized(false)
+        , Reordering(reorderingCycles)
+        , SeekCostNs(seekCostNs)
+        , IsTrimEnabled(true)
+        , MaxQueuedCompletionActions(maxQueuedCompletionActions)
+        , CompletionThreadsCount(completionThreadsCount)
+        , IdleCounter(Mon.IdleLight)
+        , Flags(flags)
+        , SectorMap(sectorMap)
+        , DeviceInFlight(FastClp2(deviceInFlight))
+        , FlightControl(CountTrailingZeroBits(DeviceInFlight))
+        , LastWarning(IsPowerOf2(deviceInFlight) ? "" : "Device inflight must be a power of 2")
+        , ReadOnly(readOnly)
+        , SharedFileHandle(fileHandle)
+        , ThreadNamePrefix(threadNamePrefix)
     {
         if (sectorMap) {
             DriveData = TDriveData();
@@ -891,9 +939,15 @@ protected:
         }
 
         Y_VERIFY_S(PCtx->ActorSystem->AppData<TAppData>(), PCtx->PDiskLogPrefix);
-        Y_VERIFY_S(PCtx->ActorSystem->AppData<TAppData>()->IoContextFactory, PCtx->PDiskLogPrefix); 
+        Y_VERIFY_S(PCtx->ActorSystem->AppData<TAppData>()->IoContextFactory, PCtx->PDiskLogPrefix);
         auto *factory = PCtx->ActorSystem->AppData<TAppData>()->IoContextFactory;
-        IoContext = factory->CreateAsyncIoContext(Path, PCtx->PDiskId, Flags, SectorMap);
+        if (SharedFileHandle) {
+            // For DDisk workers using shared file handle
+            IoContext = factory->CreateAsyncIoContextWithFile(SharedFileHandle, Path, PCtx->PDiskId, Flags, SectorMap);
+        } else {
+            // For PDisk and regular usage
+            IoContext = factory->CreateAsyncIoContext(Path, PCtx->PDiskId, Flags, SectorMap);
+        }
         if (Flags & TDeviceMode::UseSpdk) {
             SpdkState = factory->CreateSpdkState();
         }
@@ -1232,6 +1286,13 @@ protected:
             }
         }
     }
+
+    TFileHandle* GetFileHandle() override {
+        if (IoContext) {
+            return IoContext->GetFileHandle();
+        }
+        return nullptr;
+    }
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1357,9 +1418,21 @@ class TCachedBlockDevice : public TRealBlockDevice {
 public:
     TCachedBlockDevice(const TString &path, TPDiskMon &mon, ui64 reorderingCycles,
             ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags, ui32 maxQueuedCompletionActions,
-            ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk, bool readOnly)
+            ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk, bool readOnly,
+            const TString &threadNamePrefix = "Pd")
         : TRealBlockDevice(path, mon, reorderingCycles, seekCostNs, deviceInFlight, flags,
-                maxQueuedCompletionActions, completionThreadsCount, sectorMap, readOnly)
+                maxQueuedCompletionActions, completionThreadsCount, sectorMap, readOnly, threadNamePrefix)
+        , ReadsInFly(0)
+        , PDisk(pdisk)
+    {}
+
+    // Constructor for TCachedBlockDevice with shared file handle
+    TCachedBlockDevice(TFileHandle *fileHandle, const TString &path, TPDiskMon &mon, ui64 reorderingCycles,
+            ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags, ui32 maxQueuedCompletionActions,
+            ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk, bool readOnly,
+            const TString &threadNamePrefix = "Pd")
+        : TRealBlockDevice(fileHandle, path, mon, reorderingCycles, seekCostNs, deviceInFlight, flags,
+                maxQueuedCompletionActions, completionThreadsCount, sectorMap, readOnly, threadNamePrefix)
         , ReadsInFly(0)
         , PDisk(pdisk)
     {}
@@ -1495,14 +1568,37 @@ public:
 
 IBlockDevice* CreateRealBlockDevice(const TString &path, TPDiskMon &mon, ui64 reorderingCycles,
         ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags, ui32 maxQueuedCompletionActions,
-        ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk, bool readOnly) {
+        ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk, bool readOnly,
+        const TString &threadNamePrefix) {
     return new TCachedBlockDevice(path, mon, reorderingCycles, seekCostNs, deviceInFlight, flags,
-            maxQueuedCompletionActions, completionThreadsCount, sectorMap, pdisk, readOnly);
+            maxQueuedCompletionActions, completionThreadsCount, sectorMap, pdisk, readOnly,
+            threadNamePrefix);
 }
 
 IBlockDevice* CreateRealBlockDeviceWithDefaults(const TString &path, TPDiskMon &mon, TDeviceMode::TFlags flags,
-        TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem, TPDisk * const pdisk, bool readOnly) {
-    IBlockDevice *device = CreateRealBlockDevice(path, mon, 0, 0, 4, flags, 8, 1, sectorMap, pdisk, readOnly);
+        TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem, TPDisk * const pdisk, bool readOnly,
+        const TString &threadNamePrefix) {
+    IBlockDevice *device = CreateRealBlockDevice(path, mon, 0, 0, 4, flags, 8, 1, sectorMap, pdisk, readOnly,
+        threadNamePrefix);
+    device->Initialize(std::make_shared<TPDiskCtx>(actorSystem));
+    return device;
+}
+
+// Factory functions that create RealBlockDevice with existing file handle (for DDisk workers)
+IBlockDevice* CreateRealBlockDeviceWithFile(TFileHandle *fileHandle, const TString &path, TPDiskMon &mon, ui64 reorderingCycles,
+        ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags, ui32 maxQueuedCompletionActions,
+        ui32 completionThreadsCount, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk, bool readOnly,
+        const TString &threadNamePrefix) {
+    return new TCachedBlockDevice(fileHandle, path, mon, reorderingCycles, seekCostNs, deviceInFlight, flags,
+            maxQueuedCompletionActions, completionThreadsCount, sectorMap, pdisk, readOnly,
+            threadNamePrefix);
+}
+
+IBlockDevice* CreateRealBlockDeviceWithFileDefaults(TFileHandle *fileHandle, const TString &path, TPDiskMon &mon, TDeviceMode::TFlags flags,
+        TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem, TPDisk * const pdisk, bool readOnly,
+        const TString &threadNamePrefix) {
+    IBlockDevice *device = CreateRealBlockDeviceWithFile(fileHandle, path, mon, 0, 0, 4, flags, 8, 1, sectorMap, pdisk, readOnly,
+        threadNamePrefix);
     device->Initialize(std::make_shared<TPDiskCtx>(actorSystem));
     return device;
 }

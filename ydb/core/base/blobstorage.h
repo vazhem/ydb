@@ -960,6 +960,14 @@ struct TEvBlobStorage {
         EvIncrHugeReadLogResult,
         EvIncrHugeScanResult,
 
+        // DDisk events for direct operations (offset/size based)
+        EvDDiskReadRequest,
+        EvDDiskWriteRequest,
+        EvDDiskReadResponse,
+        EvDDiskWriteResponse,
+        EvDDiskReserveChunksRequest,
+        EvDDiskReserveChunksResponse,
+
         EvEnd
     };
 
@@ -2900,6 +2908,13 @@ struct TEvBlobStorage {
     struct TEvAskWardenRestartPDisk;
     struct TEvAskWardenRestartPDiskResult;
     struct TEvNotifyWardenPDiskRestarted;
+
+    struct TEvDDiskReadRequest;
+    struct TEvDDiskWriteRequest;
+    struct TEvDDiskReadResponse;
+    struct TEvDDiskWriteResponse;
+    struct TEvDDiskReserveChunksRequest;
+    struct TEvDDiskReserveChunksResponse;
 };
 
 // EPutHandleClass defines BlobStorage queue to a request to

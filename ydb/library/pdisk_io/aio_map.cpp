@@ -396,5 +396,11 @@ std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextMap(const TString &path, ui
     return std::make_unique<TAsyncIoContextMap>(path, pDiskId, sectorMap);
 }
 
+std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextMapWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TIntrusivePtr<TSectorMap> sectorMap) {
+    // SectorMap doesn't need file handles, so we ignore the fileHandle parameter
+    Y_UNUSED(fileHandle);
+    return std::make_unique<TAsyncIoContextMap>(path, pDiskId, sectorMap);
+}
+
 } // NPDisk
 } // NKikimr

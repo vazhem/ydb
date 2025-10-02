@@ -1491,6 +1491,8 @@ function tabletTypeToSymbol(type) {
         return "CM";
     case "BlockStorePartition":
         return "BP";
+    case "BlockStorePartitionDirect":
+        return "DP";
     case "BlockStoreVolume":
         return "BV";
     case "Console":

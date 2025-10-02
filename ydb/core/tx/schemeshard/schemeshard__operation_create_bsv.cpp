@@ -56,7 +56,14 @@ void ApplySharding(TTxId txId, TPathId pathId, TBlockStoreVolumeInfo::TPtr volum
 
     for (ui64 i = 0; i < count; ++i) {
         TShardIdx shardIdx;
-        if (volume->VolumeConfig.GetTabletVersion() == 2) {
+        if (volume->VolumeConfig.GetStorageMediaKind() == 10) {
+            // STORAGE_MEDIA_SSD_DIRECT
+            shardIdx = context.SS->RegisterShardInfo(
+                TShardInfo::BlockStorePartitionDirectInfo(txId, pathId)
+                    .WithBindedChannels(partitionChannels));
+            context.SS->TabletCounters->Simple()[COUNTER_BLOCKSTORE_PARTITION_DIRECT_SHARD_COUNT].Add(1);
+            txState.Shards.emplace_back(shardIdx, ETabletType::BlockStorePartitionDirect, TTxState::CreateParts);
+        } else if (volume->VolumeConfig.GetTabletVersion() == 2) {
             shardIdx = context.SS->RegisterShardInfo(
                 TShardInfo::BlockStorePartition2Info(txId, pathId)
                     .WithBindedChannels(partitionChannels));

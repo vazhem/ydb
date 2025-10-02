@@ -23,6 +23,9 @@ IActor* CreatePDisk(const TIntrusivePtr<TPDiskConfig> &cfg, const NPDisk::TMainK
 struct TPDiskMon;
 namespace NPDisk {
 
+// Forward declarations
+class IBlockDevice;
+
 struct TCommitRecord {
     ui64 FirstLsnToKeep = 0; // 0 == not set
     TVector<TChunkIdx> CommitChunks;
@@ -830,11 +833,19 @@ struct TEvChunkReserve : TEventLocal<TEvChunkReserve, TEvBlobStorage::EvChunkRes
     TOwner Owner;
     TOwnerRound OwnerRound;
     ui32 SizeChunks;
+    ui64 Cookie = 0;  // Optional cookie for tracking requests
 
     TEvChunkReserve(TOwner owner, TOwnerRound ownerRound, ui32 sizeChunks)
         : Owner(owner)
         , OwnerRound(ownerRound)
         , SizeChunks(sizeChunks)
+    {}
+
+    TEvChunkReserve(TOwner owner, TOwnerRound ownerRound, ui32 sizeChunks, ui64 cookie)
+        : Owner(owner)
+        , OwnerRound(ownerRound)
+        , SizeChunks(sizeChunks)
+        , Cookie(cookie)
     {}
 
     TString ToString() const {
@@ -846,6 +857,9 @@ struct TEvChunkReserve : TEventLocal<TEvChunkReserve, TEvBlobStorage::EvChunkRes
         str << "{EvChunkReserve ownerId# " << (ui32)record.Owner;
         str << " ownerRound# " << record.OwnerRound;
         str << " SizeChunks# " << record.SizeChunks;
+        if (record.Cookie) {
+            str << " Cookie# " << record.Cookie;
+        }
         str << "}";
         return str.Str();
     }
@@ -856,6 +870,13 @@ struct TEvChunkReserveResult : TEventLocal<TEvChunkReserveResult, TEvBlobStorage
     TVector<TChunkIdx> ChunkIds;
     TStatusFlags StatusFlags;
     TString ErrorReason;
+    ui64 Cookie = 0;  // Cookie from the original request
+
+    // DIRECT DEVICE ACCESS INFO (for DDisk direct I/O)
+    IBlockDevice* BlockDevice = nullptr;  // PDisk's block device interface
+    TString DevicePath;  // Physical device path
+    ui64 ChunkSize = 0;  // Size of each chunk
+    TVector<ui64> ChunkDeviceOffsets;  // Physical offsets on device for each chunk
 
     TEvChunkReserveResult(NKikimrProto::EReplyStatus status, TStatusFlags statusFlags)
         : Status(status)
@@ -868,6 +889,12 @@ struct TEvChunkReserveResult : TEventLocal<TEvChunkReserveResult, TEvBlobStorage
         , ErrorReason(errorReason)
     {}
 
+    TEvChunkReserveResult(NKikimrProto::EReplyStatus status, TStatusFlags statusFlags, ui64 cookie)
+        : Status(status)
+        , StatusFlags(statusFlags)
+        , Cookie(cookie)
+    {}
+
     TString ToString() const {
         return ToString(*this);
     }
@@ -877,6 +904,26 @@ struct TEvChunkReserveResult : TEventLocal<TEvChunkReserveResult, TEvBlobStorage
         str << "{EvChunkReserveResult Status# " << NKikimrProto::EReplyStatus_Name(record.Status).data();
         str << " ErrorReason# \"" << record.ErrorReason << "\"";
         str << " StatusFlags# " << StatusFlagsToString(record.StatusFlags);
+        if (record.Cookie) {
+            str << " Cookie# " << record.Cookie;
+        }
+        // DIRECT DEVICE ACCESS INFO
+        if (record.DevicePath) {
+            str << " DevicePath# \"" << record.DevicePath << "\"";
+        }
+        if (record.ChunkSize) {
+            str << " ChunkSize# " << record.ChunkSize;
+        }
+        if (record.ChunkDeviceOffsets.size()) {
+            str << " ChunkDeviceOffsets# [";
+            for (ui64 i = 0; i < record.ChunkDeviceOffsets.size(); ++i) {
+                if (i) {
+                    str << ", ";
+                }
+                str << record.ChunkDeviceOffsets[i];
+            }
+            str << "]";
+        }
         str << "}";
         return str.Str();
     }

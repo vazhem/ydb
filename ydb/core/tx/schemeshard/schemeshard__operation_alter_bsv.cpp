@@ -157,7 +157,10 @@ public:
                 }
             }
 
-            if (volume->VolumeConfig.GetTabletVersion() == 2) {
+            if (volume->VolumeConfig.GetStorageMediaKind() == 10) {
+                // STORAGE_MEDIA_SSD_DIRECT
+                txState.Shards.emplace_back(shardIdx, ETabletType::BlockStorePartitionDirect, partitionOp);
+            } else if (volume->VolumeConfig.GetTabletVersion() == 2) {
                 txState.Shards.emplace_back(shardIdx, ETabletType::BlockStorePartition2, partitionOp);
             } else {
                 txState.Shards.emplace_back(shardIdx, ETabletType::BlockStorePartition, partitionOp);

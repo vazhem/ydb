@@ -86,7 +86,8 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
 
     for (auto shard : txState->Shards) {
         if (shard.TabletType == ETabletType::BlockStorePartition ||
-            shard.TabletType == ETabletType::BlockStorePartition2) {
+            shard.TabletType == ETabletType::BlockStorePartition2 ||
+            shard.TabletType == ETabletType::BlockStorePartitionDirect) {
             continue;
         }
 

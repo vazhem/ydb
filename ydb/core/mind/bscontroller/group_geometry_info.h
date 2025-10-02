@@ -36,7 +36,10 @@ namespace NKikimr::NBsController {
             // calculate default minimum values
             const bool isMirror3dc = Type.GetErasure() == TBlobStorageGroupType::ErasureMirror3dc;
             const ui32 minNumFailRealms = isMirror3dc ? 3 : 1;
-            const ui32 minNumFailDomainsPerFailRealm = isMirror3dc ? 3 : Type.BlobSubgroupSize();
+            // TODO: change after single node testing done
+            const ui32 minNumFailDomainsPerFailRealm = isMirror3dc ? 3 :
+                (Type.GetErasure() == TBlobStorageGroupType::ErasureMirror3Direct ? 1 :
+                    Type.BlobSubgroupSize());
             const ui32 minNumVDisksPerFailDomain = 1;
 
             if (!NumFailRealms && !NumFailDomainsPerFailRealm && !NumVDisksPerFailDomain) {

@@ -123,6 +123,8 @@ class TAsyncIoContextLibaio : public IAsyncIoContext {
     TActorSystem *ActorSystem;
     TPool<TAsyncIoOperation, 1024> Pool;
     THolder<TFileHandle> File;
+    TFileHandle *SharedFileHandle = nullptr;
+    bool OwnsFileHandle = true;  // Whether this instance owns the file handle
     int LastErrno = 0;
 
     TPDiskDebugInfo PDiskInfo;
@@ -131,12 +133,28 @@ public:
     TAsyncIoContextLibaio(const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags)
         : IoContext(nullptr)
         , ActorSystem(nullptr)
+        , SharedFileHandle(nullptr)
+        , OwnsFileHandle(true)
+        , PDiskInfo(path, pDiskId, "libaio")
+    {
+        Y_UNUSED(flags);
+    }
+
+    // Constructor with shared file handle
+    TAsyncIoContextLibaio(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags)
+        : IoContext(nullptr)
+        , ActorSystem(nullptr)
+        , SharedFileHandle(fileHandle)
+        , OwnsFileHandle(false)  // Don't own shared file handles
         , PDiskInfo(path, pDiskId, "libaio")
     {
         Y_UNUSED(flags);
     }
 
     ~TAsyncIoContextLibaio() {
+        if (!OwnsFileHandle && File) {
+            (void)File.Release();
+        }
     }
 
     void InitializeMonitoring(TPDiskMon &/*mon*/) override {
@@ -159,7 +177,7 @@ public:
         int ret = io_destroy(IoContext);
         if (ret < 0) {
             switch (-ret) {
-                case EFAULT: 
+                case EFAULT:
                     result = EIoResult::BadAddress;
                     break;
                 case EINVAL:
@@ -168,12 +186,12 @@ public:
                 case ENOSYS:
                     result = EIoResult::FunctionNotImplemented;
                     break;
-                default: 
+                default:
                     Y_FAIL_S(PDiskInfo << " unexpected error in io_destroy, error# " << -ret << " strerror# " << strerror(-ret));
             }
         }
 
-        if (File) {
+        if (File && OwnsFileHandle) {
             ret = File->Flock(LOCK_UN);
             Y_VERIFY_S(ret == 0, "Error in Flock(LOCK_UN), errno# " << errno << " strerror# " << strerror(errno));
             bool isOk = File->Close();
@@ -319,24 +337,33 @@ public:
     }
 
     EIoResult Setup(ui64 maxEvents, bool doLock) override {
-        File = MakeHolder<TFileHandle>(PDiskInfo.Path.c_str(),
-            OpenExisting | RdWr | DirectAligned | Sync);
-        bool isFileOpened = File->IsOpen();
-        if (isFileOpened) {
-            if (doLock) {
-                int ret = LockFile();
-                if (ret == -1) {
-                    return EIoResult::FileLockError;
-                }
-            }
+        bool isFileOpened = false;
+
+        if (SharedFileHandle) {
+            // For clients using shared file handle
+            File.Reset(SharedFileHandle);
+            isFileOpened = File->IsOpen();
         } else {
-            int fd = open(PDiskInfo.Path.c_str(), O_RDWR);
-            if (fd < 0) {
-                LastErrno = errno;
-                return EIoResult::FileOpenError;
+            // Create own file handle
+            File = MakeHolder<TFileHandle>(PDiskInfo.Path.c_str(),
+                OpenExisting | RdWr | DirectAligned | Sync);
+            isFileOpened = File->IsOpen();
+            if (isFileOpened) {
+                if (doLock) {
+                    int ret = LockFile();
+                    if (ret == -1) {
+                        return EIoResult::FileLockError;
+                    }
+                }
             } else {
-                close(fd);
-                return EIoResult::TryAgain;
+                int fd = open(PDiskInfo.Path.c_str(), O_RDWR);
+                if (fd < 0) {
+                    LastErrno = errno;
+                    return EIoResult::FileOpenError;
+                } else {
+                    close(fd);
+                    return EIoResult::TryAgain;
+                }
             }
         }
 
@@ -735,6 +762,11 @@ public:
 std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextReal(const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags) {
     // TODO: choose TAsyncIoContextLibaio or TAsyncIoContextLiburing here
     return std::make_unique<TAsyncIoContextLibaio>(path, pDiskId, flags);
+}
+
+std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextRealWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags) {
+    // TODO: choose TAsyncIoContextLibaio or TAsyncIoContextLiburing here
+    return std::make_unique<TAsyncIoContextLibaio>(fileHandle, path, pDiskId, flags);
 }
 
 } // NPDisk

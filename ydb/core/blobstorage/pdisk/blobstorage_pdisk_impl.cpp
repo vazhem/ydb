@@ -1427,7 +1427,22 @@ void TPDisk::ChunkReserve(TChunkReserve &evChunkReserve) {
         result = MakeHolder<NPDisk::TEvChunkReserveResult>(NKikimrProto::OK, 0);
         result->ChunkIds = std::move(chunks);
         result->StatusFlags = GetStatusFlags(evChunkReserve.Owner, evChunkReserve.OwnerGroupType);
+
+        // POPULATE DEVICE INFO FOR DDISK DIRECT I/O ACCESS
+        result->BlockDevice = BlockDevice.Get();  // Share PDisk's block device interface
+        result->DevicePath = Cfg->GetDevicePath();
+        result->ChunkSize = Format.ChunkSize;
+        result->ChunkDeviceOffsets.resize(result->ChunkIds.size());
+
+        for (size_t i = 0; i < result->ChunkIds.size(); i++) {
+            TChunkIdx chunkIdx = result->ChunkIds[i];
+            // Calculate device offset using PDisk format
+            result->ChunkDeviceOffsets[i] = Format.Offset(chunkIdx, 0);
+        }
     }
+
+    // Copy the cookie from the original request
+    result->Cookie = evChunkReserve.Cookie;
 
     guard.Release();
     PCtx->ActorSystem->Send(evChunkReserve.Sender, result.Release());
@@ -3360,6 +3375,7 @@ bool TPDisk::PreprocessRequest(TRequestBase *request) {
                 P_LOG(PRI_ERROR, BPD01, err.Str());
                 THolder<NPDisk::TEvChunkReserveResult> result(new NPDisk::TEvChunkReserveResult(errStatus,
                             GetStatusFlags(ev.Owner, ev.OwnerGroupType), err.Str()));
+                result->Cookie = ev.Cookie;
                 PCtx->ActorSystem->Send(ev.Sender, result.Release());
                 Mon.ChunkReserve.CountResponse();
                 delete request;
