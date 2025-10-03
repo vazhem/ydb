@@ -514,6 +514,10 @@ static TInterconnectSettings GetInterconnectSettings(const NKikimrConfig::TInter
         }
     }
 
+    if (config.HasRdmaChecksum()) {
+        result.RdmaChecksum = config.GetRdmaChecksum();
+    }
+
     return result;
 }
 

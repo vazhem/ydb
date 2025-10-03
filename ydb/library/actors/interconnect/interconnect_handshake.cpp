@@ -946,6 +946,7 @@ namespace NActors {
                     rdmaHs->SetSubnetPrefix(gid.global.subnet_prefix);
                     rdmaHs->SetInterfaceId(gid.global.interface_id);
                     rdmaHs->SetMtuIndex(RdmaCtx->GetPortAttr().active_mtu);
+                    rdmaHs->SetRdmaChecksum(Common->Settings.RdmaChecksum);
                     if (auto region = SetupRdmaHandshakeRegion(*rdmaHs)) {
                         HandShakeMemRegion = std::move(region);
                     } else {
@@ -1026,6 +1027,7 @@ namespace NActors {
                         RdmaQp.reset();
                         HandShakeMemRegion.Reset();
                     }
+                    Params.ChecksumRdmaEvent = remoteQpPrepared.GetRdmaChecksum();
                 } else {
                     LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_ERROR,
                         "Non success qp response from remote side");
@@ -1345,6 +1347,13 @@ namespace NActors {
                         TryRdmaQpExchange(rdmaIncommingHandshake.value(), success);
                         if (RdmaQp && rdmaIncommingHandshake->HasRead()) {
                             rdma = rdmaIncommingHandshake->GetRead();
+                        }
+                        if (rdmaIncommingHandshake->HasRdmaChecksum() && rdmaIncommingHandshake->GetRdmaChecksum() == true) {
+                            Params.ChecksumRdmaEvent = Common->Settings.RdmaChecksum;
+                            success.MutableQpPrepared()->SetRdmaChecksum(Params.ChecksumRdmaEvent);
+                        } else {
+                            Params.ChecksumRdmaEvent = false;
+                            success.MutableQpPrepared()->SetRdmaChecksum(false);
                         }
                     } else {
                         success.SetRdmaErr("Rdma is not ready on the incomming side");

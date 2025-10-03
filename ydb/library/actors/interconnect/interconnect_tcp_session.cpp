@@ -1329,6 +1329,10 @@ namespace NActors {
                                 TABLED() { str << "Frame version/Checksum"; }
                                 TABLED() { str << (Params.Encryption ? "v2/none" : Params.UseXxhash ? "v2/xxhash" : "v2/crc32c"); }
                             }
+                            TABLER() {
+                                TABLED() { str << "RdmaMode" ; }
+                                TABLED() { str << (Params.UseRdma ? Params.ChecksumRdmaEvent ? "On | SoftwareChecksum" : "On" : "Off"); }
+                            }
 #define MON_VAR(NAME)     \
     TABLER() {            \
         TABLED() {        \
