@@ -8,6 +8,7 @@ import "ydb/core/protos/blobstorage_base3.proto";
 import "ydb/core/protos/blobstorage_config.proto";
 import "ydb/core/protos/blobstorage_pdisk_config.proto";
 import "ydb/core/protos/blobstorage_vdisk_config.proto";
+import "ydb/core/protos/blobstorage_ddisk_config.proto";
 import "ydb/core/protos/bootstrap.proto";
 import "ydb/core/protos/cms.proto";
 import "ydb/core/protos/compaction.proto";
@@ -2861,6 +2862,8 @@ message TAppConfig {
     optional TStatisticsConfig StatisticsConfig = 113;
     optional TMetricsConfig MetricsConfig = 114;
     optional TSystemTabletBackupConfig SystemTabletBackupConfig = 115;
+
+    optional NKikimrBlobStorage.TDDiskConfig DDiskConfig = 116;
 }
 
 message TYdbVersion {

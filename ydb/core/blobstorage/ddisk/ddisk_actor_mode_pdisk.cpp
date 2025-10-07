@@ -5,8 +5,10 @@ namespace NKikimr {
 TDDiskPDiskEventsActor::TDDiskPDiskEventsActor(
     TIntrusivePtr<TVDiskConfig> cfg,
     TIntrusivePtr<TBlobStorageGroupInfo> info,
-    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters)
-    : TDDiskActorImpl(std::move(cfg), std::move(info), EDDiskMode::PDISK_EVENTS, counters)
+    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
+    ui32 workerCount,
+    ui32 chunksPerReservation)
+    : TDDiskActorImpl(std::move(cfg), std::move(info), EDDiskMode::PDISK_EVENTS, counters, workerCount, chunksPerReservation)
 {
 }
 

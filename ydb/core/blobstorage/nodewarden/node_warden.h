@@ -30,6 +30,7 @@ namespace NKikimr {
         std::optional<TString> StartupStorageYaml;
         TIntrusivePtr<IPDiskServiceFactory> PDiskServiceFactory;
         TIntrusivePtr<TAllVDiskKinds> AllVDiskKinds;
+        NKikimrBlobStorage::TDDiskConfig DDiskConfig;
         TIntrusivePtr<NPDisk::TDriveModelDb> AllDriveModels;
         NKikimrBlobStorage::TPDiskConfig PDiskConfigOverlay;
         NKikimrConfig::TFeatureFlags FeatureFlags;

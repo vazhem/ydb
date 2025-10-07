@@ -116,6 +116,7 @@
 #include <ydb/core/protos/node_limits.pb.h>
 #include <ydb/core/protos/compile_service_config.pb.h>
 #include <ydb/core/protos/memory_controller_config.pb.h>
+#include <ydb/core/protos/blobstorage_ddisk_config.pb.h>
 
 #include <ydb/core/public_http/http_service.h>
 
@@ -985,6 +986,9 @@ void TBSNodeWardenInitializer::InitializeServices(NActors::TActorSystemSetup* se
         }
         if (Config.HasVDiskConfig()) {
             nodeWardenConfig->AllVDiskKinds->Merge(Config.GetVDiskConfig());
+        }
+        if (Config.HasDDiskConfig()) {
+            nodeWardenConfig->DDiskConfig.CopyFrom(Config.GetDDiskConfig());
         }
         if (Config.HasDriveModelConfig()) {
             nodeWardenConfig->AllDriveModels->Merge(Config.GetDriveModelConfig());
@@ -2519,7 +2523,7 @@ void TCompositeConveyorInitializer::InitializeServices(NActors::TActorSystemSetu
             protoLink.SetWeight(1);
             protoWorkersPool.SetDefaultFractionOfThreadsCount(0.4);
         }
-        
+
         NKikimrConfig::TCompositeConveyorConfig::TCategory& protoCategory = *result.AddCategories();
         protoCategory.SetName(::ToString(NConveyorComposite::ESpecialTaskCategory::Deduplication));
         NKikimrConfig::TCompositeConveyorConfig::TWorkersPool& protoWorkersPool = *result.AddWorkerPools();

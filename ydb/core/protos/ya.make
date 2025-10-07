@@ -21,6 +21,7 @@ SRCS(
     blobstorage_base.proto
     blobstorage_base3.proto
     blobstorage_config.proto
+    blobstorage_ddisk_config.proto
     blobstorage_disk.proto
     blobstorage_disk_color.proto
     blobstorage_distributed_config.proto

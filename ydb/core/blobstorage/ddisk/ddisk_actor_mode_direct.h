@@ -16,7 +16,9 @@ public:
     TDDiskDirectIOActor(
         TIntrusivePtr<TVDiskConfig> cfg,
         TIntrusivePtr<TBlobStorageGroupInfo> info,
-        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters);
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
+        ui32 workerCount,
+        ui32 chunksPerReservation);
 
 protected:
     void ProcessReadRequest(

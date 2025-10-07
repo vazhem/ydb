@@ -1,0 +1,20 @@
+package NKikimrBlobStorage;
+option java_package = "ru.yandex.kikimr.proto";
+
+// Configuration for DDisk actors
+message TDDiskConfig {
+    // Number of worker threads for DDisk operations
+    optional uint32 WorkerCount = 1 [default = 1];
+    
+    // DDisk operation mode
+    enum EDDiskMode {
+        MEMORY = 0;          // In-memory storage for debugging
+        PDISK_EVENTS = 1;    // Use PDisk events (traditional PDisk interface)
+        DIRECT_IO = 2;       // Direct device I/O to chunks (uses PDisk PreadAsync, PwriteAsync)
+    };
+    
+    optional EDDiskMode Mode = 2 [default = DIRECT_IO];
+    
+    // Number of chunks to reserve in a single batch
+    optional uint32 ChunksPerReservation = 3 [default = 10];
+};

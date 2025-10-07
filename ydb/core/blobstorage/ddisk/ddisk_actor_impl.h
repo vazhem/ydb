@@ -12,6 +12,8 @@
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_blockdevice.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_completion.h>
 #include <ydb/library/actors/wilson/wilson_trace.h>
+#include <ydb/core/base/appdata.h>
+#include <ydb/core/protos/blobstorage_ddisk_config.pb.h>
 
 #include <util/generic/hash.h>
 #include <util/generic/queue.h>
@@ -65,7 +67,7 @@ protected:
     static constexpr ui32 DEFAULT_WORKER_COUNT = 1;
     TVector<TActorId> WorkerActors;
     ui32 NextWorkerIndex;
-    ui32 WorkerCount = 1;  // Configurable via DDISK_WORKER_COUNT env var
+    ui32 WorkerCount = 1;  // Configurable via ddisk_config in config.yaml
 
     // Chunk management - track owned chunks for validation
     THashSet<ui32> KnownChunks;
@@ -160,7 +162,9 @@ public:
         TIntrusivePtr<TVDiskConfig> cfg,
         TIntrusivePtr<TBlobStorageGroupInfo> info,
         EDDiskMode mode,
-        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters)
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
+        ui32 workerCount,
+        ui32 chunksPerReservation)
         : Config(std::move(cfg))
         , GInfo(std::move(info))
         , PDiskCtx(nullptr)
@@ -169,36 +173,17 @@ public:
         , ChunkSize(0)  // Will be set during PDisk initialization
         , BlockDevice(nullptr)  // Will be set during PDisk initialization for DIRECT_IO mode
         , NextWorkerIndex(0)
-        , WorkerCount(DEFAULT_WORKER_COUNT)
+        , WorkerCount(workerCount > 0 ? workerCount : DEFAULT_WORKER_COUNT)
         , ChunkReservationInProgress(false)
-        , ChunksPerReservation(10)  // Reserve chunks in batches
+        , ChunksPerReservation(chunksPerReservation > 0 ? chunksPerReservation : 10)
         , Mode(mode)
     {
         Y_UNUSED(counters);
-
-        // Read worker count from environment variable
-        const char* workerCountEnv = getenv("DDISK_WORKER_COUNT");
-        if (workerCountEnv) {
-            try {
-                ui32 envWorkerCount = std::stoul(workerCountEnv);
-                if (envWorkerCount > 0) {
-                    WorkerCount = envWorkerCount;
-                    LOG_INFO_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
-                        "Using worker count from environment: " << WorkerCount);
-                } else {
-                    LOG_WARN_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
-                        "Invalid worker count in environment: " << workerCountEnv
-                        << " (must be > 0), using default: " << DEFAULT_WORKER_COUNT);
-                }
-            } catch (const std::exception& e) {
-                LOG_WARN_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
-                    "Failed to parse worker count from environment: " << workerCountEnv
-                    << " error: " << e.what() << ", using default: " << DEFAULT_WORKER_COUNT);
-            }
-        } else {
-            LOG_INFO_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
-                "No worker count environment variable set, using default: " << DEFAULT_WORKER_COUNT);
-        }
+        
+        LOG_INFO_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
+            "DDisk actor created with WorkerCount=" << WorkerCount 
+            << ", ChunksPerReservation=" << ChunksPerReservation
+            << ", Mode=" << (ui32)Mode);
     }
 
     void Bootstrap(const NActors::TActorContext& ctx);
@@ -208,7 +193,9 @@ public:
         TIntrusivePtr<TVDiskConfig> cfg,
         TIntrusivePtr<TBlobStorageGroupInfo> info,
         EDDiskMode mode,
-        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters);
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
+        ui32 workerCount,
+        ui32 chunksPerReservation);
 
 protected:
     // Common handlers

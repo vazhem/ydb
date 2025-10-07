@@ -3,7 +3,8 @@
 #include <ydb/core/blobstorage/vdisk/common/vdisk_context.h>
 #include <ydb/core/blobstorage/groupinfo/blobstorage_groupinfo.h>
 #include <ydb/core/blobstorage/ddisk/ddisk_actor_impl.h>
-#include <util/system/env.h>
+#include <ydb/core/base/appdata.h>
+#include <ydb/core/protos/blobstorage_ddisk_config.pb.h>
 
 using namespace NKikimrServices;
 
@@ -53,26 +54,41 @@ namespace NKikimr {
         // DDisk will initialize PDisk connection during Bootstrap via TEvYardInit
         // No need to create mock PDisk context - it will be established dynamically
 
-        // Determine the mode based on environment variable
-        TDDiskActorImpl::EDDiskMode mode;
-        TString ddiskMode = GetEnv("DDISK_MODE");
-
-        if (ddiskMode == "MEMORY") {
-            mode = TDDiskActorImpl::EDDiskMode::MEMORY;
-        } else if (ddiskMode == "PDISK_EVENTS") {
-            mode = TDDiskActorImpl::EDDiskMode::PDISK_EVENTS;
-        } else if (ddiskMode == "DIRECT_IO") {
-            mode = TDDiskActorImpl::EDDiskMode::DIRECT_IO;
-        } else {
-            // Default to DIRECT_IO if not specified or invalid
-            mode = TDDiskActorImpl::EDDiskMode::DIRECT_IO;
+        NKikimrBlobStorage::TDDiskConfig ddiskConfig;
+        if (cfg && cfg->BaseInfo.NodeWardenDDiskConfig) {
+            ddiskConfig.CopyFrom(*cfg->BaseInfo.NodeWardenDDiskConfig);
         }
 
-        // Log the selected mode
+        // Determine the mode from config
+        TDDiskActorImpl::EDDiskMode mode;
+        switch (ddiskConfig.GetMode()) {
+            case NKikimrBlobStorage::TDDiskConfig::MEMORY:
+                mode = TDDiskActorImpl::EDDiskMode::MEMORY;
+                break;
+            case NKikimrBlobStorage::TDDiskConfig::PDISK_EVENTS:
+                mode = TDDiskActorImpl::EDDiskMode::PDISK_EVENTS;
+                break;
+            case NKikimrBlobStorage::TDDiskConfig::DIRECT_IO:
+                mode = TDDiskActorImpl::EDDiskMode::DIRECT_IO;
+                break;
+            default:
+                // Default to DIRECT_IO if not specified or invalid
+                mode = TDDiskActorImpl::EDDiskMode::DIRECT_IO;
+                break;
+        }
+
+        // Get worker count and chunks per reservation from config
+        ui32 workerCount = ddiskConfig.GetWorkerCount();
+        ui32 chunksPerReservation = ddiskConfig.GetChunksPerReservation();
+
+        // Log the selected mode and worker count
         LOG_INFO_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
-            "Using DDisk mode: " << mode);
+            "Creating DDisk with mode: " << mode
+            << ", WorkerCount: " << workerCount
+            << ", ChunksPerReservation: " << chunksPerReservation);
+
         // Create the appropriate instance using the factory method
-        return TDDiskActorImpl::Create(cfg, info, mode, counters).release();
+        return TDDiskActorImpl::Create(cfg, info, mode, counters, workerCount, chunksPerReservation).release();
     }
 
 } // NKikimr

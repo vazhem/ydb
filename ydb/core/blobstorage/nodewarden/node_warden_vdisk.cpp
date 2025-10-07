@@ -186,6 +186,7 @@ namespace NKikimr::NStorage {
         baseInfo.ReplNodeRequestQuoter = ReplNodeRequestQuoter;
         baseInfo.ReplNodeResponseQuoter = ReplNodeResponseQuoter;
         baseInfo.YardInitDelay = VDiskCooldownTimeout;
+        baseInfo.NodeWardenDDiskConfig = &Cfg->DDiskConfig;
 
         TIntrusivePtr<TVDiskConfig> vdiskConfig = Cfg->AllVDiskKinds->MakeVDiskConfig(baseInfo);
         vdiskConfig->EnableVDiskCooldownTimeout = Cfg->EnableVDiskCooldownTimeout;

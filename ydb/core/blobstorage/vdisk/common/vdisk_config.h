@@ -8,6 +8,7 @@
 #include <ydb/core/blobstorage/vdisk/repl/repl_quoter.h>
 #include <ydb/core/base/blobstorage.h>
 #include <ydb/core/protos/blobstorage_vdisk_config.pb.h>
+#include <ydb/core/protos/blobstorage_ddisk_config.pb.h>
 #include <ydb/core/protos/feature_flags.pb.h>
 #include <ydb/core/control/lib/immediate_control_board_impl.h>
 #include <ydb/core/base/feature_flags.h>
@@ -47,6 +48,8 @@ namespace NKikimr {
             const ui64 WhiteboardInstanceGuid = 0;
             // handle only read requests: needed when VDisk can't write, e.g. no disk space, but still has the data
             const bool ReadOnly = false;
+            // DDisk configuration from NodeWarden
+            const NKikimrBlobStorage::TDDiskConfig* NodeWardenDDiskConfig = nullptr;
 
             TBaseInfo(
                     const TVDiskIdShort &vDiskIdShort,
