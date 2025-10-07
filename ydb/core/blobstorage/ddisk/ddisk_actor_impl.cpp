@@ -26,15 +26,17 @@ std::unique_ptr<TDDiskActorImpl> TDDiskActorImpl::Create(
     TIntrusivePtr<TVDiskConfig> cfg,
     TIntrusivePtr<TBlobStorageGroupInfo> info,
     EDDiskMode mode,
-    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters)
+    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
+    ui32 workerCount,
+    ui32 chunksPerReservation)
 {
     switch (mode) {
         case EDDiskMode::MEMORY:
-            return std::make_unique<TDDiskMemoryActor>(std::move(cfg), std::move(info), counters);
+            return std::make_unique<TDDiskMemoryActor>(std::move(cfg), std::move(info), counters, workerCount, chunksPerReservation);
         case EDDiskMode::PDISK_EVENTS:
-            return std::make_unique<TDDiskPDiskEventsActor>(std::move(cfg), std::move(info), counters);
+            return std::make_unique<TDDiskPDiskEventsActor>(std::move(cfg), std::move(info), counters, workerCount, chunksPerReservation);
         case EDDiskMode::DIRECT_IO:
-            return std::make_unique<TDDiskDirectIOActor>(std::move(cfg), std::move(info), counters);
+            return std::make_unique<TDDiskDirectIOActor>(std::move(cfg), std::move(info), counters, workerCount, chunksPerReservation);
         default:
             Y_ABORT("Unknown DDisk mode: %d", static_cast<int>(mode));
     }
@@ -64,38 +66,64 @@ void TDDiskActorImpl::HandleReadRequest(
     const TEvBlobStorage::TEvDDiskReadRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
 {
-        // Forward to worker actor
-        TActorId workerId = SelectNextWorker();
+    // Create span for tracing
+    NWilson::TSpan span(TWilson::BlobStorage, std::move(ev->TraceId.Clone()), "DDisk.Read");
 
-        LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
-            "Forwarding DDisk read request #" << ev->Cookie
-            << " (chunkId=" << ev->Get()->Record.GetChunkId()
-            << ", offset=" << ev->Get()->Record.GetOffset()
-            << ", size=" << ev->Get()->Record.GetSize() << ") to worker " << workerId.ToString()
-            << " traceId=" << ev->TraceId.GetHexTraceId());
+    // Forward to worker actor
+    TActorId workerId = SelectNextWorker();
 
-        // Forward to worker
-        ctx.Send(new IEventHandle(workerId, ev->Sender, ev->Release().Release(),
-            ev->Flags, ev->Cookie, nullptr, std::move(ev->TraceId.Clone())));
+    // Extract info before releasing event (avoid accessing moved object)
+    ui64 cookie = ev->Cookie;
+    ui32 flags = ev->Flags;
+    TActorId sender = ev->Sender;
+    ui32 chunkId = ev->Get()->Record.GetChunkId();
+    ui32 offset = ev->Get()->Record.GetOffset();
+    ui32 size = ev->Get()->Record.GetSize();
+
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "Forwarding DDisk read request #" << cookie
+        << " (chunkId=" << chunkId
+        << ", offset=" << offset
+        << ", size=" << size << ") to worker " << workerId.ToString()
+        << " traceId=" << span.GetTraceId().GetHexTraceId());
+
+    // Forward to worker using span's trace ID
+    ctx.Send(new IEventHandle(workerId, sender, ev->Release().Release(),
+        flags, cookie, nullptr, span.GetTraceId()));
+
+    span.EndOk();
 }
 
 void TDDiskActorImpl::HandleWriteRequest(
     const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
 {
+    // Create span for tracing
+    NWilson::TSpan span(TWilson::BlobStorage, std::move(ev->TraceId.Clone()), "DDisk.Write");
+
     // Forward to worker actor
     TActorId workerId = SelectNextWorker();
 
-    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
-        "Forwarding DDisk write request #" << ev->Cookie
-        << " (chunkId=" << ev->Get()->Record.GetChunkId()
-        << ", offset=" << ev->Get()->Record.GetOffset()
-        << ", size=" << ev->Get()->Record.GetSize() << ") to worker " << workerId.ToString()
-        << " traceId=" << ev->TraceId.GetHexTraceId());
+    // Extract info before releasing event (avoid accessing moved object)
+    ui64 cookie = ev->Cookie;
+    ui32 flags = ev->Flags;
+    TActorId sender = ev->Sender;
+    ui32 chunkId = ev->Get()->Record.GetChunkId();
+    ui32 offset = ev->Get()->Record.GetOffset();
+    ui32 size = ev->Get()->Record.GetSize();
 
-    // Forward to worker
-    ctx.Send(new IEventHandle(workerId, ev->Sender, ev->Release().Release(),
-        ev->Flags, ev->Cookie, nullptr, std::move(ev->TraceId.Clone())));
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "Forwarding DDisk write request #" << cookie
+        << " (chunkId=" << chunkId
+        << ", offset=" << offset
+        << ", size=" << size << ") to worker " << workerId.ToString()
+        << " traceId=" << span.GetTraceId().GetHexTraceId());
+
+    // Forward to worker using span's trace ID
+    ctx.Send(new IEventHandle(workerId, sender, ev->Release().Release(),
+        flags, cookie, nullptr, span.GetTraceId()));
+
+    span.EndOk();
 }
 
 void TDDiskActorImpl::HandleReserveChunksRequest(

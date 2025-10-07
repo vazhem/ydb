@@ -20,6 +20,10 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
         return;
     }
 
+    // Create child span for Exec() execution
+    NWilson::TSpan childSpan = Span.CreateChild(TWilson::BlobStorage, 
+        IsRead ? "DDisk.Read.TDirectIOCompletion.Exec" : "DDisk.Write.TDirectIOCompletion.Exec");
+
     LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
         "🔧 TDirectIOCompletion::Exec ENTER: this=" << (void*)this
         << " Result=" << (ui32)Result << " ChunkIdx=" << ChunkIdx << " IsRead=" << IsRead
@@ -64,13 +68,17 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
             }
         }
 
+        // Save child trace ID before sending (avoid accessing after move)
+        NWilson::TTraceId childTraceId = childSpan.GetTraceId();
+        TString childTraceIdHex = childTraceId.GetHexTraceId();
+
         LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
             "🚀 SENDING DDISK READ RESPONSE: this=" << (void*)this
             << " to=" << OriginalSender.ToString()
             << " cookie=" << OriginalCookie
             << " status=" << (ui32)status
             << " dataSize=" << (response->Record.HasData() ? response->Record.GetData().size() : 0)
-            << " traceId=" << TraceId.GetHexTraceId());
+            << " traceId=" << childTraceIdHex);
 
         // End Wilson span before sending response
         if (Span) {
@@ -85,7 +93,7 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
             LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK, "DDISK completiton no span");
         }
 
-        actorSystem->Send(new IEventHandle(OriginalSender, TActorId(), response.release(), 0, OriginalCookie, nullptr, std::move(TraceId)));
+        actorSystem->Send(new IEventHandle(OriginalSender, TActorId(), response.release(), 0, OriginalCookie, nullptr, std::move(childTraceId)));
     } else {
         // Handle write completion - send TEvDDiskWriteResponse directly to original sender
         auto response = std::make_unique<TEvBlobStorage::TEvDDiskWriteResponse>();
@@ -98,12 +106,16 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
             response->Record.SetErrorReason(ErrorReason);
         }
 
+        // Save child trace ID before sending (avoid accessing after move)
+        NWilson::TTraceId childTraceId = childSpan.GetTraceId();
+        TString childTraceIdHex = childTraceId.GetHexTraceId();
+
         LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
             "🚀 SENDING DDISK WRITE RESPONSE: this=" << (void*)this
             << " to=" << OriginalSender.ToString()
             << " cookie=" << OriginalCookie
             << " status=" << (ui32)status
-            << " traceId=" << TraceId.GetHexTraceId());
+            << " traceId=" << childTraceIdHex);
 
         // End Wilson span before sending response
         if (Span) {
@@ -114,7 +126,7 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
             }
         }
 
-        actorSystem->Send(new IEventHandle(OriginalSender, TActorId(), response.release(), 0, OriginalCookie, nullptr, std::move(TraceId)));
+        actorSystem->Send(new IEventHandle(OriginalSender, TActorId(), response.release(), 0, OriginalCookie, nullptr, std::move(childTraceId)));
     }
 
     LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
@@ -122,6 +134,12 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
         << " OriginalSender=" << OriginalSender.ToString() << " status=" << (ui32)status
         << " traceId=" << TraceId.GetHexTraceId());
 
+    // End child span before deleting object
+    if (status == NKikimrProto::OK) {
+        childSpan.EndOk();
+    } else {
+        childSpan.EndError(ErrorReason);
+    }
 
     // Логирование перед удалением объекта
     LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,

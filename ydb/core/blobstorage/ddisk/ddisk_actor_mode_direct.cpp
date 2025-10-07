@@ -6,8 +6,10 @@ namespace NKikimr {
 TDDiskDirectIOActor::TDDiskDirectIOActor(
     TIntrusivePtr<TVDiskConfig> cfg,
     TIntrusivePtr<TBlobStorageGroupInfo> info,
-    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters)
-    : TDDiskActorImpl(std::move(cfg), std::move(info), EDDiskMode::DIRECT_IO, counters)
+    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
+    ui32 workerCount,
+    ui32 chunksPerReservation)
+    : TDDiskActorImpl(std::move(cfg), std::move(info), EDDiskMode::DIRECT_IO, counters, workerCount, chunksPerReservation)
 {
 }
 
@@ -19,6 +21,10 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
     constexpr bool isRead = std::is_same_v<TRequest, TEvBlobStorage::TEvDDiskReadRequest>;
     const char* operationName = isRead ? "READ" : "WRITE";
 
+    // Create child span for ProcessDirectIORequest
+    NWilson::TSpan processSpan(TWilson::BlobStorage, std::move(ev->TraceId.Clone()), 
+        isRead ? "DDisk.Read.ProcessDirectIORequest" : "DDisk.Write.ProcessDirectIORequest");
+
     const auto* msg = ev->Get();
     const ui32 offset = msg->Record.GetOffset();
     const ui32 size = msg->Record.GetSize();
@@ -26,7 +32,7 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
 
     // Extract original request ID for traceability (if passed via cookie)
     ui64 originalRequestId = ev->Cookie;  // Используем cookie как ID запроса
-    TString traceIdStr = ev->TraceId.GetHexTraceId();  // Для логирования trace id
+    TString traceIdStr = processSpan.GetTraceId().GetHexTraceId();  // Use processSpan's trace ID for logging
 
     // Helper lambda for sending error responses
     auto sendErrorResponse = [&](const TString& errorReason) {
@@ -47,6 +53,9 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
         } else {
             sendResponse(std::make_unique<TEvBlobStorage::TEvDDiskWriteResponse>());
         }
+        
+        // End process span with error
+        processSpan.EndError(errorReason);
     };
 
     LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
@@ -162,11 +171,20 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
         }
     }
 
+    // Create span for async I/O operation before creating completion
+    NWilson::TSpan asyncIOSpan = processSpan.CreateChild(TWilson::BlobStorage,
+        isRead ? "DDisk.Read.PreadAsync" : "DDisk.Write.PwriteAsync");
+    
+    // Set span attribute for size
+    asyncIOSpan.Attribute("size_kb", alignedSize / 1024);
+
     // Create simple completion handler that properly manages the buffer
+    // Move the span into the completion (don't access asyncIOSpan after this)
     auto completion = new TDirectIOCompletion(ctx.SelfID, ev->Sender, ev->Cookie,
         originalRequestId, chunkId, offset, size, offsetAdjustment,
         isRead, alignedData, alignedSize,
-        std::move(ev->TraceId.Clone()));
+        std::move(asyncIOSpan));
+    
     LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
         "🔧 DDIRECT COMPLETION CREATED: VDiskSlotId=" << Config->BaseInfo.VDiskSlotId
         << " action=" << (void*)completion << " isRead=" << isRead << " TraceId=" << traceIdStr
@@ -195,7 +213,8 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
         << " BlockDevice=" << (void*)BlockDevice);
 
     // Perform asynchronous direct I/O operation with aligned offset and size
-    auto traceIdCopy = ev->TraceId.Clone();
+    // Use processSpan's trace ID for the block device operation
+    auto traceIdCopy = processSpan.GetTraceId();
     if constexpr (isRead) {
         BlockDevice->PreadAsync(alignedData, alignedSize, alignedDeviceOffset,
                                completion, NPDisk::TReqId(), &traceIdCopy);
@@ -203,6 +222,9 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
         BlockDevice->PwriteAsync(alignedData, alignedSize, alignedDeviceOffset,
                                 completion, NPDisk::TReqId(), &traceIdCopy);
     }
+
+    // End process span after successfully starting the I/O operation
+    processSpan.EndOk();
 }
 
 void TDDiskDirectIOActor::ProcessReadRequest(

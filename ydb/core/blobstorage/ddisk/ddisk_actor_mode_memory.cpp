@@ -1,12 +1,15 @@
 #include "ddisk_actor_mode_memory.h"
+#include <ydb/library/wilson_ids/wilson.h>
 
 namespace NKikimr {
 
 TDDiskMemoryActor::TDDiskMemoryActor(
     TIntrusivePtr<TVDiskConfig> cfg,
     TIntrusivePtr<TBlobStorageGroupInfo> info,
-    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters)
-    : TDDiskActorImpl(std::move(cfg), std::move(info), EDDiskMode::MEMORY, counters)
+    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
+    ui32 workerCount,
+    ui32 chunksPerReservation)
+    : TDDiskActorImpl(std::move(cfg), std::move(info), EDDiskMode::MEMORY, counters, workerCount, chunksPerReservation)
 {
 }
 
@@ -14,6 +17,8 @@ void TDDiskMemoryActor::ProcessReadRequest(
     const TEvBlobStorage::TEvDDiskReadRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
 {
+    NWilson::TSpan span(TWilson::BlobStorage, std::move(ev->TraceId.Clone()), "DDisk.Read");
+
     const auto* msg = ev->Get();
     const ui64 offset = msg->Record.GetOffset();
     const ui32 size = msg->Record.GetSize();
@@ -77,12 +82,16 @@ void TDDiskMemoryActor::ProcessReadRequest(
     }
 
     NextRequestCookie++;
+
+    span.EndOk();
 }
 
 void TDDiskMemoryActor::ProcessWriteRequest(
     const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
 {
+    NWilson::TSpan span(TWilson::BlobStorage, std::move(ev->TraceId.Clone()), "DDisk.Write");
+
     const auto* msg = ev->Get();
     const ui32 offset = msg->Record.GetOffset();  // Use ui32 for chunk-relative offset
     const ui32 size = msg->Record.GetSize();
@@ -138,6 +147,8 @@ void TDDiskMemoryActor::ProcessWriteRequest(
 
     ctx.Send(ev->Sender, response.release(), 0, ev->Cookie);
     NextRequestCookie++;
+
+    span.EndOk();
 }
 
 void TDDiskMemoryActor::HandleReadRequest(

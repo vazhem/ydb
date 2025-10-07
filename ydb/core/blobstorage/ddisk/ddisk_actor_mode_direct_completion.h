@@ -35,7 +35,7 @@ public:
     TDirectIOCompletion(const TActorId& ddiskActorId, const TActorId& originalSender,
                        ui64 originalCookie, ui64 requestId, TChunkIdx chunkIdx, ui32 originalOffset,
                        ui32 originalSize, ui32 offsetAdjustment, bool isRead,
-                       char* alignedBuffer, ui32 alignedSize, NWilson::TTraceId traceId)
+                       char* alignedBuffer, ui32 alignedSize, NWilson::TSpan&& span)
         : DDiskActorId(ddiskActorId)
         , OriginalSender(originalSender)
         , OriginalCookie(originalCookie)
@@ -47,7 +47,7 @@ public:
         , IsRead(isRead)
         , AlignedBuffer(alignedBuffer)
         , AlignedSize(alignedSize)
-        , Span(TWilson::BlobStorage, std::move(traceId), isRead ? "DDisk.DirectReadCompletion" : "DDisk.DirectWriteCompletion")
+        , Span(std::move(span))
     {
         // Initialize base class TCompletionAction fields
         OperationIdx = 0;  // Will be set by PDisk when operation is scheduled

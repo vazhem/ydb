@@ -262,11 +262,19 @@ void TDDiskWorkerActor::ProcessDirectIORequest(
         }
     }
 
+    // Create span for async I/O operation before creating completion
+    NWilson::TSpan asyncIOSpan(TWilson::BlobStorage, std::move(ev->TraceId.Clone()),
+        isRead ? "DDisk.Read.PreadAsync" : "DDisk.Write.PwriteAsync");
+
+    // Set span attribute for size
+    asyncIOSpan.Attribute("size_kb", alignedSize / 1024);
+
     // Create completion handler that properly manages the buffer
+    // Move the span into the completion (don't access asyncIOSpan after this)
     auto completion = new TDirectIOCompletion(ctx.SelfID, ev->Sender, ev->Cookie,
         originalRequestId, chunkId, offset, size, offsetAdjustment,
         isRead, alignedData, alignedSize,
-        std::move(ev->TraceId.Clone()));
+        std::move(asyncIOSpan));
 
     LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
         "[Worker" << WorkerId << "] DIRECT COMPLETION CREATED: VDiskSlotId=" << Config.VDiskSlotId
