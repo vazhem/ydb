@@ -271,17 +271,20 @@ namespace NKikimr::NStorage {
         auto *as = TActivationContext::ActorSystem();
         // register ddisk actor instead of vdisk actor for mirror3direct erasure groups
         IActor* actor;
+        TActorId actorId;
         if (groupInfo->Type.GetErasure() == TBlobStorageGroupType::ErasureMirror3Direct) {
             actor = CreateDDisk(vdiskConfig, groupInfo, AppData()->Counters);
             LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::BS_CONTROLLER,
-            "StartLocalVDiskActor: created DDisk actor");
+                "StartLocalVDiskActor: created DDisk actor");
+
+            actorId = as->Register(actor, TMailboxType::ReadAsFilled, AppData()->SystemPoolId);
         } else {
             actor = CreateVDisk(vdiskConfig, groupInfo, AppData()->Counters);
             LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::BS_CONTROLLER,
             "StartLocalVDiskActor: created VDisk actor");
+
+            actorId = as->Register(actor, TMailboxType::Revolving, AppData()->SystemPoolId);
         }
-        TActorId actorId = as->Register(actor,
-            TMailboxType::Revolving, AppData()->SystemPoolId);
         as->RegisterLocalService(vdiskServiceId, actorId);
         VDiskIdByActor.try_emplace(actorId, vslotId);
 

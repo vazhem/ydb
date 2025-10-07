@@ -1623,3 +1623,11 @@ message TEvDDiskWriteResponse {
     optional uint32 Size = 4;
     optional uint32 ChunkId = 5;  // Chunk ID that was written to
 }
+
+message TEvDDiskPing {
+    // Empty message for ping request
+}
+
+message TEvDDiskPingResponse {
+    optional NKikimrProto.EReplyStatus Status = 1;
+}

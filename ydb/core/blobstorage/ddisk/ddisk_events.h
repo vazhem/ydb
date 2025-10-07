@@ -153,6 +153,36 @@ namespace NKikimr {
         }
     };
 
+    struct TEvBlobStorage::TEvDDiskPing
+        : TEventPB<TEvBlobStorage::TEvDDiskPing,
+                   NKikimrBlobStorage::TEvDDiskPing,
+                   TEvBlobStorage::EvDDiskPing> {
+
+        TEvDDiskPing() = default;
+
+        TString ToString() const override {
+            return "TEvDDiskPing {}";
+        }
+    };
+
+    struct TEvBlobStorage::TEvDDiskPingResponse
+        : TEventPB<TEvBlobStorage::TEvDDiskPingResponse,
+                   NKikimrBlobStorage::TEvDDiskPingResponse,
+                   TEvBlobStorage::EvDDiskPingResponse> {
+
+        TEvDDiskPingResponse() = default;
+
+        TEvDDiskPingResponse(NKikimrProto::EReplyStatus status) {
+            Record.SetStatus(status);
+        }
+
+        TString ToString() const override {
+            TStringStream str;
+            str << "TEvDDiskPingResponse {Status# " << NKikimrProto::EReplyStatus_Name(Record.GetStatus()).data() << "}";
+            return str.Str();
+        }
+    };
+
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // DDisk Internal Events - Local events for DDisk worker coordination
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

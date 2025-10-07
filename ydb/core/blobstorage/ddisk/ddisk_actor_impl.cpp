@@ -470,6 +470,33 @@ void TDDiskActorImpl::HandleYardInitResult(
     }
 }
 
+void TDDiskActorImpl::HandlePing(
+    const TEvBlobStorage::TEvDDiskPing::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    // Create Wilson span for tracing
+    NWilson::TSpan span(TWilson::BlobStorage, std::move(ev->TraceId.Clone()), "DDisk.Ping");
+
+    // Extract sender and cookie before releasing event to avoid accessing moved object
+    TActorId sender = ev->Sender;
+    ui64 cookie = ev->Cookie;
+
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "DDiskActorImpl: Received TEvDDiskPing from " << sender.ToString()
+        << " cookie=" << cookie
+        << " traceId=" << span.GetTraceId().GetHexTraceId());
+
+    // Create and send response
+    auto response = std::make_unique<TEvBlobStorage::TEvDDiskPingResponse>(NKikimrProto::OK);
+    ctx.Send(sender, response.release(), 0, cookie);
+
+    // Finish span with success
+    span.EndOk();
+
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "DDiskActorImpl: TEvDDiskPing processed successfully for " << sender.ToString());
+}
+
 void TDDiskActorImpl::SendErrorResponse(const TPendingRequest& request, const TString& errorReason, const NActors::TActorContext& ctx)
 {
     if (request.IsWrite) {

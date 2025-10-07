@@ -219,6 +219,10 @@ protected:
         const NPDisk::TEvYardInitResult::TPtr& ev,
         const NActors::TActorContext& ctx);
 
+    void HandlePing(
+        const TEvBlobStorage::TEvDDiskPing::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
     // Helper methods
     void InitializePDisk(const NActors::TActorContext& ctx);
     void SendErrorResponse(const TPendingRequest& request, const TString& errorReason, const NActors::TActorContext& ctx);
@@ -245,6 +249,7 @@ private:
             HFunc(TEvBlobStorage::TEvDDiskReadRequest, HandleReadRequest);
             HFunc(TEvBlobStorage::TEvDDiskWriteRequest, HandleWriteRequest);
             HFunc(TEvBlobStorage::TEvDDiskReserveChunksRequest, HandleReserveChunksRequest);
+            HFunc(TEvBlobStorage::TEvDDiskPing, HandlePing);
             HFunc(NPDisk::TEvYardInitResult, HandleYardInitResult);
             HFunc(NPDisk::TEvChunkReserveResult, HandleChunkReserveResult);
             HFunc(NPDisk::TEvChunkReadResult, HandleChunkReadResult);
