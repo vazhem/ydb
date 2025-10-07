@@ -310,7 +310,7 @@ void TCompletionChunkReadPart::Release(TActorSystem *actorSystem) {
 }
 
 TCompletionChunkRead::TCompletionChunkRead(TPDisk *pDisk, TIntrusivePtr<TChunkRead> &read, std::function<void()> onDestroy,
-            ui64 chunkNonce, IRcBufAllocator* alloc, NWilson::TSpan&& span)
+            ui64 chunkNonce, IRcBufAllocator* alloc)
     : TCompletionAction()
     , PDisk(pDisk)
     , Read(read)
