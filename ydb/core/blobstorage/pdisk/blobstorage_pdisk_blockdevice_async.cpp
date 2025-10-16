@@ -1597,7 +1597,14 @@ IBlockDevice* CreateRealBlockDeviceWithFile(TFileHandle *fileHandle, const TStri
 IBlockDevice* CreateRealBlockDeviceWithFileDefaults(TFileHandle *fileHandle, const TString &path, TPDiskMon &mon, TDeviceMode::TFlags flags,
         TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem, TPDisk * const pdisk, bool readOnly,
         const TString &threadNamePrefix) {
-    IBlockDevice *device = CreateRealBlockDeviceWithFile(fileHandle, path, mon, 0, 0, 4, flags, 8, 1, sectorMap, pdisk, readOnly,
+    // Defaults:
+    // reorderingCycles = 0,
+    // seekCostNs = 0,
+    // deviceInFlight = 128, !!!
+    // maxQueuedCompletionActions = 512, !!!
+    // completionThreadsCount = 1
+    // TODO: make thru config depending on device model, like for pdisk
+    IBlockDevice *device = CreateRealBlockDeviceWithFile(fileHandle, path, mon, 0, 0, 128, flags, 512, 1, sectorMap, pdisk, readOnly,
         threadNamePrefix);
     device->Initialize(std::make_shared<TPDiskCtx>(actorSystem));
     return device;

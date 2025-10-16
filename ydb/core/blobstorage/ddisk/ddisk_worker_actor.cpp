@@ -36,7 +36,7 @@ TDDiskWorkerActor::TDDiskWorkerActor(ui32 workerId, const TDDiskWorkerConfig& co
         "[Worker" << WorkerId << "] Creating RealBlockDevice with shared file handle for device: " << Config.DevicePath);
 
     // Create unique prefix for DDisk worker threads using WorkerId
-    TString threadPrefix = TStringBuilder() << "DD" << WorkerId;
+    TString threadPrefix = TStringBuilder() << "DD_" << WorkerId << "_";
 
     BlockDevice.reset(NPDisk::CreateRealBlockDeviceWithFileDefaults(
         Config.SharedFileHandle,  // Use shared file handle from PDisk

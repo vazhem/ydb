@@ -86,7 +86,16 @@ protected:
         NWilson::TSpan Span;  // Wilson tracing span for this request
 
         TPendingRequest() = default;
-        TPendingRequest(ui32 offset, ui32 size, ui32 chunkId, TActorId sender, ui64 cookie, bool isWrite, const TString& writeData = "", ui64 originalRequestId = 0, bool isDirectIO = false, NWilson::TSpan span = NWilson::TSpan())
+        TPendingRequest(ui32 offset,
+            ui32 size,
+            ui32 chunkId,
+            TActorId sender,
+            ui64 cookie,
+            bool isWrite,
+            const TString& writeData = "",
+            ui64 originalRequestId = 0,
+            bool isDirectIO = false,
+            NWilson::TSpan span = NWilson::TSpan())
             : Offset(offset), Size(size), ChunkId(chunkId), Sender(sender), Cookie(cookie), IsWrite(isWrite), WriteData(writeData), OriginalRequestId(originalRequestId), IsDirectIO(isDirectIO), Span(std::move(span)) {}
     };
 
@@ -153,6 +162,14 @@ public:
         const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
         const NActors::TActorContext& ctx) = 0;
 
+    virtual void HandleChunkReadResult(
+        const NPDisk::TEvChunkReadResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    virtual void HandleChunkWriteResult(
+        const NPDisk::TEvChunkWriteResult::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
 public:
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
         return NKikimrServices::TActivity::BS_SKELETON_FRONT;
@@ -179,9 +196,9 @@ public:
         , Mode(mode)
     {
         Y_UNUSED(counters);
-        
+
         LOG_INFO_S(TActivationContext::AsActorContext(), NKikimrServices::BS_DDISK,
-            "DDisk actor created with WorkerCount=" << WorkerCount 
+            "DDisk actor created with WorkerCount=" << WorkerCount
             << ", ChunksPerReservation=" << ChunksPerReservation
             << ", Mode=" << (ui32)Mode);
     }
@@ -205,14 +222,6 @@ protected:
 
     void HandleChunkReserveResult(
         const NPDisk::TEvChunkReserveResult::TPtr& ev,
-        const NActors::TActorContext& ctx);
-
-    void HandleChunkReadResult(
-        const NPDisk::TEvChunkReadResult::TPtr& ev,
-        const NActors::TActorContext& ctx);
-
-    void HandleChunkWriteResult(
-        const NPDisk::TEvChunkWriteResult::TPtr& ev,
         const NActors::TActorContext& ctx);
 
     void HandleYardInitResult(

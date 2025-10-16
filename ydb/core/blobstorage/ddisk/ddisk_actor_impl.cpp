@@ -264,157 +264,19 @@ void TDDiskActorImpl::HandleChunkReserveResult(
 }
 
 void TDDiskActorImpl::HandleChunkReadResult(
-    const NPDisk::TEvChunkReadResult::TPtr& ev,
-    const NActors::TActorContext& ctx)
-{
-    const auto* msg = ev->Get();
-    void* cookie = msg->Cookie;
-
-    auto it = PendingRequests.find(cookie);
-    if (it == PendingRequests.end()) {
-        LOG_ERROR_S(ctx, NKikimrServices::BS_DDISK,
-            "DDiskActorImpl: Received chunk read result for unknown request"
-            << " cookie=" << 0
-            << " pendingCount=" << PendingRequests.size());
-        return;
-    }
-
-    const TPendingRequest& request = it->second;
-
-    // Log response data details for verification
-    TString responseDataPrefix, responseDataSuffix;
-    if (msg->Data.Size() >= 32 && msg->Data.IsReadable()) {
-        TRcBuf responseDataBuf = msg->Data.ToString();
-        TString responseDataStr = TString(responseDataBuf.GetData(), responseDataBuf.GetSize());
-        for (int i = 0; i < std::min<int>(16, responseDataStr.size()); i++) {
-            responseDataPrefix += TStringBuilder() << " " << (ui32)(ui8)responseDataStr[i];
-        }
-        if (responseDataStr.size() > 16) {
-            for (int i = std::max<int>(16, static_cast<int>(responseDataStr.size()-16)); i < static_cast<int>(responseDataStr.size()); i++) {
-                responseDataSuffix += TStringBuilder() << " " << (ui32)(ui8)responseDataStr[i];
-            }
-        }
-    }
-
-    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
-        "📥 PDISK → DDISK READ RESULT: reqId=" << 0
-        << " status=" << NKikimrProto::EReplyStatus_Name(msg->Status)
-        << " chunkId=" << msg->ChunkIdx << " originalOffset=" << request.Offset
-        << " requestedSize=" << request.Size << " receivedSize=" << msg->Data.Size()
-        << " vDiskId=" << SelfVDiskId.ToString()
-        << " vSlotId=" << Config->BaseInfo.VDiskSlotId
-        << " pdisk=" << PDiskCtx->PDiskId.ToString()
-        << " dataPrefix[" << responseDataPrefix << " ]"
-        << " dataSuffix[" << responseDataSuffix << " ]");
-
-    // Create response
-    auto response = std::make_unique<TEvBlobStorage::TEvDDiskReadResponse>();
-    response->Record.SetStatus(msg->Status);
-    response->Record.SetErrorReason(msg->ErrorReason);
-    response->Record.SetOffset(request.Offset);
-    response->Record.SetSize(request.Size);
-
-    if (msg->Status == NKikimrProto::OK) {
-        // Extract data from PDisk response
-        TString data(request.Size, 0);  // Initialize with zeros
-
-        // Check if we have any data and if it's readable
-        if (msg->Data.Size() > 0) {
-            // Check if the entire buffer is readable (no gaps)
-            if (msg->Data.IsReadable()) {
-                // Data is clean, extract what we can
-                TRcBuf responseDataBuf = msg->Data.ToString();
-                size_t copySize = Min(static_cast<size_t>(responseDataBuf.GetSize()), static_cast<size_t>(request.Size));
-                memcpy(const_cast<char*>(data.data()), responseDataBuf.GetData(), copySize);
-            } else {
-                // Data has gaps - try to extract readable portions
-                // For now, we'll return zeros for corrupt data
-                LOG_WARN_S(ctx, NKikimrServices::BS_DDISK,
-                    "DDiskActorImpl: Received data with gaps from PDisk, chunk=" << msg->ChunkIdx
-                    << " returning zeros for request offset=" << request.Offset
-                    << " size=" << request.Size);
-            }
-        }
-
-        response->Record.SetData(std::move(data));
-    } else {
-        // Return zeros on error
-        response->Record.SetData(TString(request.Size, 0));
-    }
-
-    // Send response back
-    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
-        "🚀 SENDING DDISK READ RESPONSE: reqId=" << 0
-        << " to=" << request.Sender.ToString() << " cookie=" << reinterpret_cast<uintptr_t>(request.Cookie)
-        << " status=" << NKikimrProto::EReplyStatus_Name(response->Record.GetStatus())
-        << " dataSize=" << response->Record.GetData().size()
-        << " chunkId=" << response->Record.GetChunkId()
-        << " vDiskId=" << SelfVDiskId.ToString());
-
-    ctx.Send(request.Sender, response.release(), 0, request.Cookie);
-
-    // Clean up pending request
-    PendingRequests.erase(it);
+        const NPDisk::TEvChunkReadResult::TPtr& ev,
+        const NActors::TActorContext& ctx) {
+    Y_UNUSED(ev, ctx);
+    Y_VERIFY_S(false, "Not expected HandleChunkReadResult");
 }
 
 void TDDiskActorImpl::HandleChunkWriteResult(
     const NPDisk::TEvChunkWriteResult::TPtr& ev,
-    const NActors::TActorContext& ctx)
-{
-    const auto* msg = ev->Get();
-    void* cookie = msg->Cookie;
-
-    auto it = PendingRequests.find(cookie);
-    if (it == PendingRequests.end()) {
-        LOG_ERROR_S(ctx, NKikimrServices::BS_DDISK,
-            "DDiskActorImpl: Received chunk write result for unknown request"
-            << " cookie=" << 0
-            << " pendingCount=" << PendingRequests.size());
-        return;
-    }
-
-    const TPendingRequest& request = it->second;
-
-    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
-        "📥 PDISK → DDISK WRITE RESULT: reqId=" << 0
-        << " status=" << NKikimrProto::EReplyStatus_Name(msg->Status)
-        << " chunkId=" << msg->ChunkIdx << " originalOffset=" << request.Offset
-        << " requestedSize=" << request.Size
-        << " vDiskId=" << SelfVDiskId.ToString()
-        << " vSlotId=" << Config->BaseInfo.VDiskSlotId
-        << " pdisk=" << PDiskCtx->PDiskId.ToString()
-        << " writtenDataSize=" << request.WriteData.size());
-
-    // Create response
-    auto response = std::make_unique<TEvBlobStorage::TEvDDiskWriteResponse>();
-    response->Record.SetStatus(msg->Status);
-    response->Record.SetErrorReason(msg->ErrorReason);
-    response->Record.SetOffset(request.Offset);
-    response->Record.SetSize(request.Size);
-    response->Record.SetChunkId(request.ChunkId);
-
-    // Send response back
-    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
-        "🚀 SENDING DDISK RESPONSE: reqId=" << 0
-        << " to=" << request.Sender.ToString() << " cookie=" << reinterpret_cast<uintptr_t>(request.Cookie)
-        << " status=" << NKikimrProto::EReplyStatus_Name(response->Record.GetStatus())
-        << " vDiskId=" << SelfVDiskId.ToString());
-
-    ctx.Send(request.Sender, response.release(), 0, request.Cookie);
-
-    // End Wilson span with appropriate status (need to make a copy to modify)
-    auto span = std::move(const_cast<TPendingRequest&>(request).Span);
-    if (span) {
-        if (msg->Status == NKikimrProto::OK) {
-            span.EndOk();
-        } else {
-            span.EndError(msg->ErrorReason);
-        }
-    }
-
-    // Clean up pending request
-    PendingRequests.erase(it);
+    const NActors::TActorContext& ctx) {
+    Y_UNUSED(ev, ctx);
+    Y_VERIFY_S(false, "Not expected HandleChunkWriteResult");
 }
+
 
 void TDDiskActorImpl::InitializePDisk(const NActors::TActorContext& ctx)
 {
