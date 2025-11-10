@@ -43,20 +43,22 @@ void TDDiskMemoryActor::ProcessReadRequest(
     if (chunkIt != InMemoryChunks.end()) {
         // Read data from in-memory chunk
         TString data = chunkIt->second.ReadData(offset, size);
-        auto response = std::make_unique<TEvBlobStorage::TEvDDiskReadResponse>();
-        response->Record.SetOffset(offset);
-        response->Record.SetSize(size);
-        response->Record.SetChunkId(chunkId);
-        response->Record.SetData(data);
-        response->Record.SetStatus(NKikimrProto::OK);
-
-        // Log read data for debugging
+        
+        // Log read data for debugging before moving
         TString dataLogPrefix;
         if (data.size() >= 16) {
             for (int i = 0; i < std::min<int>(16, data.size()); i++) {
                 dataLogPrefix += TStringBuilder() << " " << (ui32)(ui8)data[i];
             }
         }
+        
+        auto response = std::make_unique<TEvBlobStorage::TEvDDiskReadResponse>();
+        response->Record.SetOffset(offset);
+        response->Record.SetSize(size);
+        response->Record.SetChunkId(chunkId);
+        // Store data as payload instead of in protobuf (data is moved here)
+        response->StorePayload(TRope(std::move(data)));
+        response->Record.SetStatus(NKikimrProto::OK);
 
         LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
             "📥 IN-MEMORY READ RESULT: reqId=" << NextRequestCookie
@@ -70,7 +72,8 @@ void TDDiskMemoryActor::ProcessReadRequest(
         response->Record.SetOffset(offset);
         response->Record.SetSize(size);
         response->Record.SetChunkId(chunkId);
-        response->Record.SetData(TString(size, '\0'));
+        // Store empty data as payload instead of in protobuf
+        response->StorePayload(TRope(TString(size, '\0')));
         response->Record.SetStatus(NKikimrProto::OK);
 
         LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
@@ -96,7 +99,9 @@ void TDDiskMemoryActor::ProcessWriteRequest(
     const ui32 offset = msg->Record.GetOffset();  // Use ui32 for chunk-relative offset
     const ui32 size = msg->Record.GetSize();
     const ui32 chunkId = msg->Record.GetChunkId();
-    const TString& data = msg->Record.GetData();
+    // Get data from rope payload instead of protobuf
+    TRope dataRope = msg->GetItemBuffer();
+    TString data = dataRope.ConvertToString();
 
     // Extract original request ID for traceability (if passed via cookie)
     ui64 originalRequestId = ev->Cookie;  // Используем cookie как ID запроса

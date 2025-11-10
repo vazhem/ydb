@@ -1,7 +1,5 @@
 LIBRARY()
 
-NO_OPTIMIZE()
-
 SRCS(
     ddisk_actor.cpp
     ddisk_actor_impl.cpp

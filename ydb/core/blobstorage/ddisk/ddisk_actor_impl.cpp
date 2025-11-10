@@ -374,7 +374,8 @@ void TDDiskActorImpl::SendErrorResponse(const TPendingRequest& request, const TS
         response->Record.SetErrorReason(errorReason);
         response->Record.SetOffset(request.Offset);
         response->Record.SetSize(request.Size);
-        response->Record.SetData(TString(request.Size, 0));
+        // Store empty data as payload instead of in protobuf
+        response->StorePayload(TRope(TString(request.Size, 0)));
         ctx.Send(request.Sender, response.release(), 0, request.Cookie);
     }
 }

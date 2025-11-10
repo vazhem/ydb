@@ -40,14 +40,39 @@ namespace NKikimr {
         TEvDDiskWriteRequest(ui64 offset, ui32 size, const TString& data) {
             Record.SetOffset(offset);
             Record.SetSize(size);
-            Record.SetData(data);
+            // Store data as payload instead of in protobuf
+            StorePayload(TRope(data));
+        }
+
+        // Store payload as rope, similar to TEvVPut
+        void StorePayload(TRope&& buffer) {
+            AddPayload(std::move(buffer));
+        }
+
+        // Get the buffer for the item, similar to TEvVMultiPut
+        TRope GetItemBuffer() const {
+            // First check if data is in the old format (protobuf field)
+            if (Record.HasData() && !Record.GetData().empty()) {
+                return TRope(Record.GetData());
+            }
+            // Otherwise get from payload
+            if (GetPayloadCount() > 0) {
+                return GetPayload(0);
+            }
+            return TRope();
         }
 
         TString ToString() const override {
             TStringStream str;
+            ui32 dataSize = 0;
+            if (GetPayloadCount() > 0) {
+                dataSize = GetPayload(0).size();
+            } else if (Record.HasData()) {
+                dataSize = Record.GetData().size();
+            }
             str << "TEvDDiskWriteRequest {Offset# " << Record.GetOffset()
                 << " Size# " << Record.GetSize()
-                << " DataSize# " << Record.GetData().size() << "}";
+                << " DataSize# " << dataSize << "}";
             return str.Str();
         }
     };
@@ -66,15 +91,39 @@ namespace NKikimr {
             }
         }
 
+        // Store payload as rope, similar to TEvVPut
+        void StorePayload(TRope&& buffer) {
+            AddPayload(std::move(buffer));
+        }
+
+        // Get the buffer for the item, similar to TEvVMultiPut
+        TRope GetItemBuffer() const {
+            // First check if data is in the old format (protobuf field)
+            if (Record.HasData() && !Record.GetData().empty()) {
+                return TRope(Record.GetData());
+            }
+            // Otherwise get from payload
+            if (GetPayloadCount() > 0) {
+                return GetPayload(0);
+            }
+            return TRope();
+        }
+
         TString ToString() const override {
             TStringStream str;
+            ui32 dataSize = 0;
+            if (GetPayloadCount() > 0) {
+                dataSize = GetPayload(0).size();
+            } else if (Record.HasData()) {
+                dataSize = Record.GetData().size();
+            }
             str << "TEvDDiskReadResponse {Status# " << NKikimrProto::EReplyStatus_Name(Record.GetStatus()).data();
             if (!Record.GetErrorReason().empty()) {
                 str << " ErrorReason# \"" << Record.GetErrorReason() << "\"";
             }
             str << " Offset# " << Record.GetOffset()
                 << " Size# " << Record.GetSize()
-                << " DataSize# " << Record.GetData().size() << "}";
+                << " DataSize# " << dataSize << "}";
             return str.Str();
         }
     };

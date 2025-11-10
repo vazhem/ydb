@@ -36,22 +36,24 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
 
     // Helper lambda for sending error responses
     auto sendErrorResponse = [&](const TString& errorReason) {
-        auto sendResponse = [&](auto response) {
+        if constexpr (isRead) {
+            auto response = std::make_unique<TEvBlobStorage::TEvDDiskReadResponse>();
             response->Record.SetStatus(NKikimrProto::ERROR);
             response->Record.SetErrorReason(errorReason);
             response->Record.SetOffset(offset);
             response->Record.SetSize(size);
             response->Record.SetChunkId(chunkId);
-            if constexpr (requires { response->Record.SetData(TString()); }) {
-                response->Record.SetData(TString(size, 0));
-            }
+            // Store empty data as payload for read error responses
+            response->StorePayload(TRope(TString(size, 0)));
             ctx.Send(ev->Sender, response.release(), 0, ev->Cookie);
-        };
-
-        if constexpr (isRead) {
-            sendResponse(std::make_unique<TEvBlobStorage::TEvDDiskReadResponse>());
         } else {
-            sendResponse(std::make_unique<TEvBlobStorage::TEvDDiskWriteResponse>());
+            auto response = std::make_unique<TEvBlobStorage::TEvDDiskWriteResponse>();
+            response->Record.SetStatus(NKikimrProto::ERROR);
+            response->Record.SetErrorReason(errorReason);
+            response->Record.SetOffset(offset);
+            response->Record.SetSize(size);
+            response->Record.SetChunkId(chunkId);
+            ctx.Send(ev->Sender, response.release(), 0, ev->Cookie);
         }
         
         // End process span with error
@@ -71,7 +73,7 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
 
     // For write operations, validate data size
     if constexpr (!isRead) {
-        const TString& data = msg->Record.GetData();
+        TRope data = msg->GetItemBuffer();
         if (data.size() != size) {
             TString errorReason = TStringBuilder() << "Data size mismatch: expected=" << size
                                                    << " actual=" << data.size();
@@ -104,6 +106,12 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
     ui64 alignedDeviceOffset = actualDeviceOffset & ~511ULL;  // Round down to 512-byte boundary
     ui32 offsetAdjustment = static_cast<ui32>(actualDeviceOffset - alignedDeviceOffset);
 
+    // Get data buffer if this is a write (store it to avoid accessing after potential moves)
+    TRope writeDataRope;
+    if constexpr (!isRead) {
+        writeDataRope = msg->GetItemBuffer();
+    }
+
     // Calculate aligned size
     ui32 alignedSize;
     if constexpr (isRead) {
@@ -112,9 +120,8 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
         alignedSize = (adjustedSize + 511) & ~511;  // Round up to nearest 512 bytes
     } else {
         // For writes, we need to read-modify-write if not aligned
-        const TString& data = msg->Record.GetData();
-        bool needsReadModifyWrite = (offsetAdjustment != 0 || (data.size() & 511) != 0);
-        alignedSize = ((data.size() + offsetAdjustment + 511) & ~511);  // Round up to nearest 512 bytes
+        bool needsReadModifyWrite = (offsetAdjustment != 0 || (writeDataRope.size() & 511) != 0);
+        alignedSize = ((writeDataRope.size() + offsetAdjustment + 511) & ~511);  // Round up to nearest 512 bytes
 
         LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
             "🔍 DIRECT WRITE ALIGNMENT: reqId=" << 0
@@ -123,7 +130,7 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
             << " actualDeviceOffset=" << actualDeviceOffset
             << " alignedDeviceOffset=" << alignedDeviceOffset
             << " offsetAdjustment=" << offsetAdjustment
-            << " dataSize=" << data.size() << " alignedSize=" << alignedSize
+            << " dataSize=" << writeDataRope.size() << " alignedSize=" << alignedSize
             << " needsReadModifyWrite=" << needsReadModifyWrite);
     }
 
@@ -151,23 +158,26 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
         // Zero-initialize the buffer to avoid reading garbage data
         memset(alignedData, 0, alignedSize);
     } else {
-        // For writes, handle data copying
-        const TString& data = msg->Record.GetData();
-        bool needsReadModifyWrite = (offsetAdjustment != 0 || (data.size() & 511) != 0);
+        // For writes, handle data copying from rope
+        bool needsReadModifyWrite = (offsetAdjustment != 0 || (writeDataRope.size() & 511) != 0);
 
+        // Zero-initialize the buffer first
+        memset(alignedData, 0, alignedSize);
+
+        // Copy data from rope to aligned buffer
+        char* destPtr = alignedData;
         if (needsReadModifyWrite && offsetAdjustment > 0) {
-            // For read-modify-write, we should read the existing data first
-            // For now, zero-initialize and write the data at the correct offset
-            memset(alignedData, 0, alignedSize);
-            memcpy(alignedData + offsetAdjustment, data.data(), data.size());
-
+            destPtr = alignedData + offsetAdjustment;
             LOG_ERROR_S(ctx, NKikimrServices::BS_DDISK,
                 "⚠️ READ-MODIFY-WRITE: copying data at offset " << offsetAdjustment
-                << " within aligned buffer, dataSize=" << data.size());
-        } else {
-            // Simple case: just zero-initialize and copy data
-            memset(alignedData, 0, alignedSize);
-            memcpy(alignedData, data.data(), data.size());
+                << " within aligned buffer, dataSize=" << writeDataRope.size());
+        }
+
+        // Copy rope data to buffer
+        size_t copiedBytes = 0;
+        for (auto it = writeDataRope.Begin(); it != writeDataRope.End(); ++it) {
+            memcpy(destPtr + copiedBytes, it.ContiguousData(), it.ContiguousSize());
+            copiedBytes += it.ContiguousSize();
         }
     }
 

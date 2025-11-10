@@ -65,7 +65,8 @@ void TDDiskPDiskEventsActor::ProcessReadRequest(
         response->Record.SetOffset(offset);
         response->Record.SetSize(size);
         response->Record.SetChunkId(chunkId);
-        response->Record.SetData(TString(size, 0));
+        // Store empty data as payload instead of in protobuf
+        response->StorePayload(TRope(TString(size, 0)));
         ctx.Send(ev->Sender, response.release(), 0, ev->Cookie);
         return;
     }
@@ -78,7 +79,8 @@ void TDDiskPDiskEventsActor::ProcessReadRequest(
         response->Record.SetOffset(offset);
         response->Record.SetSize(size);
         response->Record.SetChunkId(chunkId);
-        response->Record.SetData(TString(size, 0));
+        // Store empty data as payload instead of in protobuf
+        response->StorePayload(TRope(TString(size, 0)));
         ctx.Send(ev->Sender, response.release(), 0, ev->Cookie);
         return;
     }
@@ -127,7 +129,8 @@ void TDDiskPDiskEventsActor::ProcessWriteRequest(
     const ui32 offset = msg->Record.GetOffset();  // Use ui32 for chunk-relative offset
     const ui32 size = msg->Record.GetSize();
     const ui32 chunkId = msg->Record.GetChunkId();
-    const TString& data = msg->Record.GetData();
+    // Get data from rope payload instead of protobuf
+    TRope dataRope = msg->GetItemBuffer();
 
     NWilson::TSpan span(TWilson::BlobStorage, std::move(ev->TraceId.Clone()),
         "DDisk.Write.ProcessWriteRequest");
@@ -145,12 +148,12 @@ void TDDiskPDiskEventsActor::ProcessWriteRequest(
         << " vDiskId=" << SelfVDiskId.ToString()
         << " vSlotId=" << Config->BaseInfo.VDiskSlotId
         << " Mode=PDISK_EVENTS"
-        << " dataSize=" << data.size());
+        << " dataSize=" << dataRope.size());
 
     // Validate data size
-    if (data.size() != size) {
+    if (dataRope.size() != size) {
         TString errorReason = TStringBuilder() << "Data size mismatch: expected=" << size
-                                               << " actual=" << data.size();
+                                               << " actual=" << dataRope.size();
         auto response = std::make_unique<TEvBlobStorage::TEvDDiskWriteResponse>();
         response->Record.SetStatus(NKikimrProto::ERROR);
         response->Record.SetErrorReason(errorReason);
@@ -189,14 +192,15 @@ void TDDiskPDiskEventsActor::ProcessWriteRequest(
     // Create a unique cookie for this request using incrementing counter
     void* cookie = reinterpret_cast<void*>(static_cast<uintptr_t>(NextRequestCookie++));
 
-    // Store pending request
+    // Store pending request - convert rope to string for storage (move semantic)
+    TString dataString = dataRope.ConvertToString();
     NWilson::TTraceId childTraceId = span.GetTraceId();
-    PendingRequests[cookie] = TPendingRequest(offset, size, chunkId, ev->Sender, ev->Cookie, true, data,
+    PendingRequests[cookie] = TPendingRequest(offset, size, chunkId, ev->Sender, ev->Cookie, true, dataString,
         0, false, std::move(span));
 
-    // Create write parts from data
-    TRope rope(data);  // Create rope from the data string
-    auto writeParts = MakeIntrusive<NPDisk::TEvChunkWrite::TRopeAlignedParts>(std::move(rope), size);
+    // Create write parts from data rope (dataRope was moved, create new one from string)
+    TRope writeRope(dataString);
+    auto writeParts = MakeIntrusive<NPDisk::TEvChunkWrite::TRopeAlignedParts>(std::move(writeRope), size);
 
     // Send chunk write request to PDisk
     ui32 pdiskOffset = static_cast<ui32>(offset);
@@ -221,7 +225,7 @@ void TDDiskPDiskEventsActor::ProcessWriteRequest(
         << " → pdisk=" << PDiskCtx->PDiskId.ToString()
         << " owner=" << PDiskCtx->Dsk->Owner.Val
         << " ownerRound=" << PDiskCtx->Dsk->OwnerRound
-        << " dataSize=" << data.size());
+        << " dataSize=" << dataString.size());
 
     ctx.Send(PDiskCtx->PDiskId, pdiskRequest.release(), 0, 0, std::move(childTraceId));
 }
@@ -300,10 +304,11 @@ void TDDiskPDiskEventsActor::HandleChunkReadResult(
             }
         }
 
-        response->Record.SetData(std::move(data));
+        // Store data as payload instead of in protobuf
+        response->StorePayload(TRope(std::move(data)));
     } else {
         // Return zeros on error
-        response->Record.SetData(TString(request.Size, 0));
+        response->StorePayload(TRope(TString(request.Size, 0)));
     }
 
     // Send response back
@@ -311,7 +316,7 @@ void TDDiskPDiskEventsActor::HandleChunkReadResult(
         "🚀 SENDING DDISK READ RESPONSE: reqId=" << 0
         << " to=" << request.Sender.ToString() << " cookie=" << reinterpret_cast<uintptr_t>(request.Cookie)
         << " status=" << NKikimrProto::EReplyStatus_Name(response->Record.GetStatus())
-        << " dataSize=" << response->Record.GetData().size()
+        << " dataSize=" << (response->GetPayloadCount() > 0 ? response->GetPayload(0).size() : 0)
         << " chunkId=" << response->Record.GetChunkId()
         << " vDiskId=" << SelfVDiskId.ToString());
 

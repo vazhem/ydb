@@ -21,7 +21,7 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
     }
 
     // Create child span for Exec() execution
-    NWilson::TSpan childSpan = Span.CreateChild(TWilson::BlobStorage, 
+    NWilson::TSpan childSpan = Span.CreateChild(TWilson::BlobStorage,
         IsRead ? "DDisk.Read.TDirectIOCompletion.Exec" : "DDisk.Write.TDirectIOCompletion.Exec");
 
     LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
@@ -56,16 +56,21 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
             char* actualDataStart = AlignedBuffer + OffsetAdjustment;
 
             // Verify we don't read beyond the buffer
+            ui32 actualSize = OriginalSize;
             if (OffsetAdjustment + OriginalSize > AlignedSize) {
                 LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_DDISK,
                     "⚠️ TDirectIOCompletion::Exec buffer overflow protection: OffsetAdjustment="
                     << OffsetAdjustment << " OriginalSize=" << OriginalSize << " AlignedSize=" << AlignedSize);
-
-                ui32 safeSize = Min(OriginalSize, AlignedSize - OffsetAdjustment);
-                response->Record.SetData(TString(actualDataStart, safeSize));
-            } else {
-                response->Record.SetData(TString(actualDataStart, OriginalSize));
+                actualSize = Min(OriginalSize, AlignedSize - OffsetAdjustment);
             }
+
+            // Allocate buffer from RDMA pool
+            IRcBufAllocator* allocator = actorSystem->GetRcBufAllocator();
+            TRcBuf rdmaBuf = allocator->AllocRcBuf(actualSize, 0, 0);
+            memcpy(rdmaBuf.GetDataMut(), actualDataStart, actualSize);
+            TRope rdmaRope(std::move(rdmaBuf));
+            // Store data as rope payload
+            response->StorePayload(std::move(rdmaRope));
         }
 
         // Save child trace ID before sending (avoid accessing after move)
@@ -77,7 +82,7 @@ void TDirectIOCompletion::Exec(TActorSystem *actorSystem) {
             << " to=" << OriginalSender.ToString()
             << " cookie=" << OriginalCookie
             << " status=" << (ui32)status
-            << " dataSize=" << (response->Record.HasData() ? response->Record.GetData().size() : 0)
+            << " dataSize=" << (response->GetPayloadCount() > 0 ? response->GetPayload(0).size() : 0)
             << " traceId=" << childTraceIdHex);
 
         // End Wilson span before sending response

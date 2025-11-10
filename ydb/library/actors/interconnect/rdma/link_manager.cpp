@@ -100,7 +100,8 @@ private:
                 ibv_port_attr portAttrs;
                 err = ibv_query_port(ctx, portNum, &portAttrs);
                 if (err == 0) {
-                    for (int gidIndex = 0; gidIndex < portAttrs.gid_tbl_len; gidIndex++ ) {
+                    // TODO: use ibv_get_gid_type_ex to filter v2
+                    for (int gidIndex = 1; gidIndex < portAttrs.gid_tbl_len; gidIndex+=2 ) {
                         auto ctx = TRdmaCtx::Create(deviceCtx, portNum, gidIndex);
                         if (!ctx) {
                             continue;
@@ -159,4 +160,4 @@ const TCtxsMap& GetAllCtxs() {
     return RdmaLinkManager.GetAllCtxs();
 }
 
-} 
+}
