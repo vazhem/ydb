@@ -11,6 +11,7 @@
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_mon.h>
 #include <ydb/core/blobstorage/ddisk/ddisk_actor_impl.h>
 #include <ydb/core/blobstorage/ddisk/ddisk_events.h>
+#include <ydb/library/actors/interconnect/rdma_lazy_event.h>
 
 #include <util/generic/hash.h>
 #include <memory>
@@ -81,6 +82,7 @@ private:
         switch (ev->GetTypeRewrite()) {
             HFunc(TEvBlobStorage::TEvDDiskReadRequest, HandleReadRequest);
             HFunc(TEvBlobStorage::TEvDDiskWriteRequest, HandleWriteRequest);
+            HFunc(NActors::TEvRdmaLazyWrite, HandleRdmaLazyWrite);
             HFunc(TEvDDiskChunkInfoUpdate, HandleChunkInfoUpdate);
 
             CFunc(NActors::TEvents::TSystem::PoisonPill, Die);
@@ -97,6 +99,10 @@ private:
 
     void HandleWriteRequest(
         const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleRdmaLazyWrite(
+        const NActors::TEvRdmaLazyWrite::TPtr& ev,
         const NActors::TActorContext& ctx);
 
     void HandleChunkInfoUpdate(

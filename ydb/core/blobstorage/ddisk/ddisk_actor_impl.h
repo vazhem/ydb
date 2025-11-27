@@ -12,6 +12,7 @@
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_blockdevice.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_completion.h>
 #include <ydb/library/actors/wilson/wilson_trace.h>
+#include <ydb/library/actors/interconnect/rdma_lazy_event.h>
 #include <ydb/core/base/appdata.h>
 #include <ydb/core/protos/blobstorage_ddisk_config.pb.h>
 
@@ -257,6 +258,7 @@ private:
         switch (ev->GetTypeRewrite()) {
             HFunc(TEvBlobStorage::TEvDDiskReadRequest, HandleReadRequest);
             HFunc(TEvBlobStorage::TEvDDiskWriteRequest, HandleWriteRequest);
+            HFunc(NActors::TEvRdmaLazyWrite, HandleRdmaLazyWrite);
             HFunc(TEvBlobStorage::TEvDDiskReserveChunksRequest, HandleReserveChunksRequest);
             HFunc(TEvBlobStorage::TEvDDiskPing, HandlePing);
             HFunc(NPDisk::TEvYardInitResult, HandleYardInitResult);
@@ -278,6 +280,10 @@ private:
 
     virtual void HandleWriteRequest(
         const TEvBlobStorage::TEvDDiskWriteRequest::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    virtual void HandleRdmaLazyWrite(
+        const NActors::TEvRdmaLazyWrite::TPtr& ev,
         const NActors::TActorContext& ctx);
 };
 

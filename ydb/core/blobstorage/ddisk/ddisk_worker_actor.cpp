@@ -86,6 +86,58 @@ void TDDiskWorkerActor::HandleWriteRequest(
     ProcessDirectIORequest<TEvBlobStorage::TEvDDiskWriteRequest>(ev, ctx);
 }
 
+void TDDiskWorkerActor::HandleRdmaLazyWrite(
+    const NActors::TEvRdmaLazyWrite::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    // This is where we perform the deferred deserialization that was skipped in CQ thread
+    // CQ thread saved ~100us by deferring this work to us (DDisk worker)
+    const auto* rdmaEv = ev->Get();
+
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "[Worker" << WorkerId << "] Received RDMA lazy write from " << ev->Sender.ToString()
+        << " cookie=" << rdmaEv->Cookie
+        << " payloadSize=" << rdmaEv->Payload.size()
+        << " metadataSize=" << rdmaEv->SerializedMetadata.size());
+
+    // Deserialize protobuf metadata to create TEvDDiskWriteRequest
+    // This is the ~50-90us operation we deferred from CQ thread
+    auto writeRequest = std::make_unique<TEvBlobStorage::TEvDDiskWriteRequest>();
+    if (!writeRequest->Record.ParseFromString(rdmaEv->SerializedMetadata)) {
+        LOG_ERROR_S(ctx, NKikimrServices::BS_DDISK,
+            "[Worker" << WorkerId << "] Failed to deserialize RDMA write metadata, cookie=" << rdmaEv->Cookie);
+
+        // Send error response back to original sender
+        auto response = std::make_unique<TEvBlobStorage::TEvDDiskWriteResponse>();
+        response->Record.SetStatus(NKikimrProto::ERROR);
+        response->Record.SetErrorReason("Failed to deserialize RDMA metadata in worker");
+        ctx.Send(rdmaEv->ResponseTarget, response.release(), 0, rdmaEv->Cookie);
+        return;
+    }
+
+    // Attach RDMA payload directly to the request (convert TRcBuf -> TRope, no extra copy)
+    // This avoids the ~10-30us memory copy that was in old CQ code
+    TRope payloadRope;
+    payloadRope.Insert(payloadRope.End(), rdmaEv->Payload);
+    writeRequest->StorePayload(std::move(payloadRope));
+
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "[Worker" << WorkerId << "] Deserialized RDMA write: chunkId=" << writeRequest->Record.GetChunkId()
+        << " offset=" << writeRequest->Record.GetOffset()
+        << " size=" << writeRequest->Record.GetSize());
+
+    // Construct event pointer and call ProcessDirectIORequest directly
+    // Create IEventHandle with correct sender/recipient (recipient=self, sender=remote)
+    IEventHandle* handle = new IEventHandle(
+        ctx.SelfID, rdmaEv->ResponseTarget, writeRequest.release(),
+        0, rdmaEv->Cookie, nullptr, rdmaEv->TraceId.Clone());
+    
+    TEvBlobStorage::TEvDDiskWriteRequest::TPtr writeRequestPtr(
+        reinterpret_cast<TEventHandle<TEvBlobStorage::TEvDDiskWriteRequest>*>(handle));
+
+    ProcessDirectIORequest<TEvBlobStorage::TEvDDiskWriteRequest>(writeRequestPtr, ctx);
+}
+
 void TDDiskWorkerActor::HandleChunkInfoUpdate(
     const TEvDDiskChunkInfoUpdate::TPtr& ev,
     const NActors::TActorContext& ctx)

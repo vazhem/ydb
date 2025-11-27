@@ -2919,6 +2919,7 @@ struct TEvBlobStorage {
     struct TEvDDiskReserveChunksResponse;
     struct TEvDDiskPing;
     struct TEvDDiskPingResponse;
+    struct TEvDDiskWriteRequestRdma;
 };
 
 // EPutHandleClass defines BlobStorage queue to a request to

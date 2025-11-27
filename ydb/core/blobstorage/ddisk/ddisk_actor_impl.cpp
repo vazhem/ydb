@@ -126,6 +126,35 @@ void TDDiskActorImpl::HandleWriteRequest(
     span.EndOk();
 }
 
+void TDDiskActorImpl::HandleRdmaLazyWrite(
+    const NActors::TEvRdmaLazyWrite::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    // Create span for tracing (using the trace ID from RDMA command)
+    NWilson::TSpan span(TWilson::BlobStorage, std::move(ev->Get()->TraceId.Clone()), "DDisk.WriteRdma");
+
+    // Forward lazy RDMA event to worker actor for deserialization
+    TActorId workerId = SelectNextWorker();
+
+    // Extract info before releasing event
+    ui64 cookie = ev->Get()->Cookie;
+    TActorId sender = ev->Sender;
+    ui32 payloadSize = ev->Get()->Payload.size();
+
+    LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+        "Forwarding DDisk RDMA lazy write #" << cookie
+        << " (payloadSize=" << payloadSize
+        << ") to worker " << workerId.ToString()
+        << " for lazy deserialization"
+        << " traceId=" << span.GetTraceId().GetHexTraceId());
+
+    // Forward to worker using span's trace ID
+    ctx.Send(new IEventHandle(workerId, sender, ev->Release().Release(),
+        0, cookie, nullptr, span.GetTraceId()));
+
+    span.EndOk();
+}
+
 void TDDiskActorImpl::HandleReserveChunksRequest(
     const TEvBlobStorage::TEvDDiskReserveChunksRequest::TPtr& ev,
     const NActors::TActorContext& ctx)
