@@ -33,6 +33,10 @@ SRCS(
     interconnect_nameserver_table.cpp
     interconnect_proxy_wrapper.cpp
     interconnect_proxy_wrapper.h
+    interconnect_rdma_api.cpp
+    interconnect_rdma_api.h
+    interconnect_rdma_transport.cpp
+    interconnect_rdma_transport.h
     interconnect_resolve.cpp
     interconnect_stream.cpp
     interconnect_stream.h
@@ -60,6 +64,20 @@ SRCS(
     poller_tcp_unit_select.cpp
     poller_tcp_unit_select.h
     profiler.h
+    rdma_cq_command_handler.cpp
+    rdma_cq_command_handler.h
+    rdma_recv_handler.cpp
+    rdma_recv_handler.h
+    rdma_connection_registry.cpp
+    rdma_connection_registry.h
+    rdma_qp_registry.cpp
+    rdma_qp_registry.h
+    rdma_data_transfer_events.h
+    rdma_event_base.h
+    rdma_event_serializer.cpp
+    rdma_event_serializer.h
+    rdma_memory_region.cpp
+    rdma_memory_region.h
     slowpoke_actor.h
     subscription_manager.cpp
     subscription_manager.h
@@ -84,6 +102,7 @@ PEERDIR(
     ydb/library/actors/dnsresolver
     ydb/library/actors/helpers
     ydb/library/actors/interconnect/rdma
+    ydb/library/actors/interconnect/rdma_data_transfer_proto
     ydb/library/actors/prof
     ydb/library/actors/protos
     ydb/library/actors/util

@@ -3,6 +3,8 @@
 #include <ydb/core/base/blobstorage.h>
 #include <ydb/core/protos/blobstorage.pb.h>
 #include <ydb/library/actors/core/event_pb.h>
+#include <ydb/library/actors/interconnect/rdma_event_base.h>
+#include <ydb/library/actors/util/rope.h>
 
 namespace NKikimr {
 
@@ -13,7 +15,8 @@ namespace NKikimr {
     struct TEvBlobStorage::TEvDDiskReadRequest
         : TEventPB<TEvBlobStorage::TEvDDiskReadRequest,
                    NKikimrBlobStorage::TEvDDiskReadRequest,
-                   TEvBlobStorage::EvDDiskReadRequest> {
+                   TEvBlobStorage::EvDDiskReadRequest>
+        , NActors::IRdmaPassable {
 
         TEvDDiskReadRequest() = default;
 
@@ -28,12 +31,34 @@ namespace NKikimr {
                 << " Size# " << Record.GetSize() << "}";
             return str.Str();
         }
+
+        // IRdmaPassable implementation
+        TRope GetRdmaPayload() const override {
+            // Read requests don't have outgoing payload
+            return TRope();
+        }
+
+        void SetRdmaPayload(TRope&& payload) override {
+            // Read requests don't have outgoing payload
+            Y_UNUSED(payload);
+        }
+
+        TString SerializeMetadata() const override {
+            TString result;
+            Y_PROTOBUF_SUPPRESS_NODISCARD Record.SerializeToString(&result);
+            return result;
+        }
+
+        bool DeserializeMetadata(const TString& metadata) override {
+            return Record.ParseFromString(metadata);
+        }
     };
 
     struct TEvBlobStorage::TEvDDiskWriteRequest
         : TEventPB<TEvBlobStorage::TEvDDiskWriteRequest,
                    NKikimrBlobStorage::TEvDDiskWriteRequest,
-                   TEvBlobStorage::EvDDiskWriteRequest> {
+                   TEvBlobStorage::EvDDiskWriteRequest>
+        , NActors::IRdmaPassable {
 
         TEvDDiskWriteRequest() = default;
 
@@ -75,12 +100,32 @@ namespace NKikimr {
                 << " DataSize# " << dataSize << "}";
             return str.Str();
         }
+
+        // IRdmaPassable implementation
+        TRope GetRdmaPayload() const override {
+            return GetItemBuffer();
+        }
+
+        void SetRdmaPayload(TRope&& payload) override {
+            StorePayload(std::move(payload));
+        }
+
+        TString SerializeMetadata() const override {
+            TString result;
+            Y_PROTOBUF_SUPPRESS_NODISCARD Record.SerializeToString(&result);
+            return result;
+        }
+
+        bool DeserializeMetadata(const TString& metadata) override {
+            return Record.ParseFromString(metadata);
+        }
     };
 
     struct TEvBlobStorage::TEvDDiskReadResponse
         : TEventPB<TEvBlobStorage::TEvDDiskReadResponse,
                    NKikimrBlobStorage::TEvDDiskReadResponse,
-                   TEvBlobStorage::EvDDiskReadResponse> {
+                   TEvBlobStorage::EvDDiskReadResponse>
+        , NActors::IRdmaPassable {
 
         TEvDDiskReadResponse() = default;
 
@@ -126,12 +171,32 @@ namespace NKikimr {
                 << " DataSize# " << dataSize << "}";
             return str.Str();
         }
+
+        // IRdmaPassable implementation
+        TRope GetRdmaPayload() const override {
+            return GetItemBuffer();
+        }
+
+        void SetRdmaPayload(TRope&& payload) override {
+            StorePayload(std::move(payload));
+        }
+
+        TString SerializeMetadata() const override {
+            TString result;
+            Y_PROTOBUF_SUPPRESS_NODISCARD Record.SerializeToString(&result);
+            return result;
+        }
+
+        bool DeserializeMetadata(const TString& metadata) override {
+            return Record.ParseFromString(metadata);
+        }
     };
 
     struct TEvBlobStorage::TEvDDiskWriteResponse
         : TEventPB<TEvBlobStorage::TEvDDiskWriteResponse,
                    NKikimrBlobStorage::TEvDDiskWriteResponse,
-                   TEvBlobStorage::EvDDiskWriteResponse> {
+                   TEvBlobStorage::EvDDiskWriteResponse>
+        , NActors::IRdmaPassable {
 
         TEvDDiskWriteResponse() = default;
 
@@ -151,6 +216,27 @@ namespace NKikimr {
             str << " Offset# " << Record.GetOffset()
                 << " Size# " << Record.GetSize() << "}";
             return str.Str();
+        }
+
+        // IRdmaPassable implementation
+        TRope GetRdmaPayload() const override {
+            // Write responses typically don't have payload
+            return TRope();
+        }
+
+        void SetRdmaPayload(TRope&& payload) override {
+            // Write responses typically don't have payload
+            Y_UNUSED(payload);
+        }
+
+        TString SerializeMetadata() const override {
+            TString result;
+            Y_PROTOBUF_SUPPRESS_NODISCARD Record.SerializeToString(&result);
+            return result;
+        }
+
+        bool DeserializeMetadata(const TString& metadata) override {
+            return Record.ParseFromString(metadata);
         }
     };
 
@@ -261,5 +347,9 @@ namespace NKikimr {
             }
         }
     };
+
+    // Register DDisk RDMA event factories
+    // This must be called before using RDMA to send/receive DDisk events
+    void RegisterDDiskRdmaEvents();
 
 } // namespace NKikimr

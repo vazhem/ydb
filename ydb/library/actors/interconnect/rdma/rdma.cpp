@@ -5,6 +5,9 @@
 #include <util/thread/lfqueue.h>
 
 #include <ydb/library/actors/core/actorsystem.h>
+#include <ydb/library/actors/interconnect/rdma_recv_handler.h>
+#include <ydb/library/actors/interconnect/rdma_qp_registry.h>
+#include <ydb/library/actors/interconnect/rdma_memory_region.h>
 
 #include <util/datetime/base.h>
 #include <ydb/library/actors/interconnect/rdma/ibdrv/include/infiniband/verbs.h>
@@ -14,6 +17,19 @@
 #include <library/cpp/monlib/dynamic_counters/counters.h>
 
 #include <util/system/thread.h>
+#include <util/system/mutex.h>
+#include <ydb/library/actors/util/rc_buf.h>
+#include <mutex>
+#include <unordered_map>
+
+// Forward declare TRcBuf from global scope
+class TRcBuf;
+
+// External: RECV buffer storage (defined in interconnect_handshake.cpp in NActors namespace)
+namespace NActors {
+    extern std::mutex g_HandshakeRecvBuffersLock;
+    extern std::unordered_map<ui32, std::vector<TRcBuf>> g_HandshakeRecvBuffers;
+}
 
 namespace NInterconnect::NRdma {
 
@@ -95,7 +111,7 @@ public:
     }
 
     void Release() noexcept override {
-        Cb = TCb(); 
+        Cb = TCb();
         CqCommon->ReturnWr(this);
     }
 
@@ -320,11 +336,86 @@ public:
 
     void HandleWc(ibv_wc* wc, size_t sz) noexcept {
         for (size_t i = 0; i < sz; i++, wc++) {
-            TWr* wr = &WrBuf[wc->wr_id];
-            double passed = wr->GetTimePassed();
-            RdmaDeviceVerbTimeUs->Collect(passed * 1000000.0);
-            wr->Reply(As, wc);
-            ReturnWr(wr); 
+            // Check work completion opcode
+            if (wc->opcode == IBV_WC_RECV) {
+                // Handle incoming RECV completion
+                // Use QP number directly from work completion structure
+                ui32 qpNum = wc->qp_num;
+                // wr_id contains only the buffer index
+                ui32 bufferIndex = static_cast<ui32>(wc->wr_id);
+
+                // Look up QP connection info
+                auto qpInfo = NActors::TRdmaQpRegistry::Instance().Get(qpNum);
+                if (!qpInfo || !qpInfo->IsValid()) {
+                    // QP not registered or invalid - skip this completion
+                    continue;
+                }
+
+                // Get RECV buffer
+                void* recvBuffer = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(NActors::g_HandshakeRecvBuffersLock);
+                    auto it = NActors::g_HandshakeRecvBuffers.find(qpNum);
+                    if (it != NActors::g_HandshakeRecvBuffers.end() && bufferIndex < it->second.size()) {
+                        recvBuffer = const_cast<char*>(it->second[bufferIndex].GetData());
+                    }
+                }
+
+                if (!recvBuffer) {
+                    // Buffer not found - skip this completion
+                    continue;
+                }
+
+                // Check work completion status
+                if (wc->status != IBV_WC_SUCCESS) {
+                    // RECV failed - log error and skip
+                    continue;
+                }
+
+                size_t recvSize = wc->byte_len;
+
+                // Call RECV handler to process received data
+                NActors::TRdmaRecvHandler::HandleRecvCompletion(
+                    As, wc, recvBuffer, recvSize, qpInfo->Qp, qpInfo->Cq);
+
+                // Repost RECV work request
+                // Extract RDMA region from buffer for reposting
+                if (auto* allocator = As->GetRcBufAllocator()) {
+                    std::lock_guard<std::mutex> lock(NActors::g_HandshakeRecvBuffersLock);
+                    auto it = NActors::g_HandshakeRecvBuffers.find(qpNum);
+                    if (it != NActors::g_HandshakeRecvBuffers.end() && bufferIndex < it->second.size()) {
+                        auto& buf = it->second[bufferIndex];
+
+                        // Get RDMA region using helper function
+                        auto regionOpt = NActors::ExtractRdmaRegionFromRcBuf(buf, qpInfo->RdmaDeviceIndex);
+                        if (regionOpt) {
+                            auto& region = *regionOpt;
+
+                            // Repost RECV WR
+                            struct ibv_sge sge;
+                            memset(&sge, 0, sizeof(sge));
+                            sge.addr = region.Address;
+                            sge.length = region.Size;
+                            sge.lkey = region.Lkey;
+
+                            struct ibv_recv_wr recvWr, *bad_wr = nullptr;
+                            memset(&recvWr, 0, sizeof(recvWr));
+                            recvWr.wr_id = wc->wr_id; // Reuse same wr_id
+                            recvWr.sg_list = &sge;
+                            recvWr.num_sge = 1;
+
+                            qpInfo->Qp->PostRecv(&recvWr, &bad_wr);
+                        }
+                    }
+                }
+            } else {
+                // Handle SEND/WRITE/READ completions (existing code)
+                TWr* wr = &WrBuf[wc->wr_id];
+                double passed = wr->GetTimePassed();
+                RdmaDeviceVerbTimeUs->Collect(passed * 1000000.0);
+                wr->Reply(As, wc);
+                ReturnWr(wr);
+            }
         }
     }
 
@@ -353,7 +444,7 @@ protected:
     TLockFreeQueue<TWaiterCtx*> Waiters;
     std::atomic<bool> Err;
     std::atomic<ui64> Allocated;
-    alignas(64) std::atomic<ui64> Returned; 
+    alignas(64) std::atomic<ui64> Returned;
     NMonitoring::THistogramPtr RdmaDeviceVerbTimeUs;
 };
 
@@ -513,19 +604,32 @@ int TQueuePair::ToResetState() noexcept {
     return ibv_modify_qp(Qp, &qpAttr, IBV_QP_STATE);
 }
 
+int TQueuePair::ToInitState(TRdmaCtx* ctx) noexcept {
+    // Transition QP from RESET to INIT state
+    // After this, RECV work requests can be posted
+    struct ibv_qp_attr qpAttr;
+    memset(&qpAttr, 0, sizeof(qpAttr));
+
+    qpAttr.qp_state = IBV_QPS_INIT;
+    qpAttr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+    qpAttr.pkey_index = 0;
+    qpAttr.port_num = ctx->GetPortNum();
+
+    int err = ibv_modify_qp(Qp, &qpAttr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
+    return err;
+}
+
 int TQueuePair::ToRtsState(TRdmaCtx* ctx, ui32 qpNum, const ibv_gid& gid, int mtuIndex) noexcept {
     // ibv_modify_qp() returns 0 on success, or the value of errno on
     //  failure (which indicates the failure reason).
-    {   // modify QP to INIT
-        struct ibv_qp_attr qpAttr;
-        memset(&qpAttr, 0, sizeof(qpAttr));
 
-        qpAttr.qp_state = IBV_QPS_INIT;
-        qpAttr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
-        qpAttr.pkey_index = 0;
-        qpAttr.port_num = ctx->GetPortNum();
-
-        int err = ibv_modify_qp(Qp, &qpAttr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
+    // NOTE: QP should already be in INIT state (caller should call ToInitState first)
+    // But for backwards compatibility, check if we're still in RESET and transition to INIT
+    struct ibv_qp_attr qpAttr;
+    struct ibv_qp_init_attr initAttr;
+    int err = ibv_query_qp(Qp, &qpAttr, IBV_QP_STATE, &initAttr);
+    if (err == 0 && qpAttr.qp_state == IBV_QPS_RESET) {
+        err = ToInitState(ctx);
         if (err) {
             return err;
         }
@@ -569,7 +673,7 @@ int TQueuePair::ToRtsState(TRdmaCtx* ctx, ui32 qpNum, const ibv_gid& gid, int mt
     }
 
     return 0;
-} 
+}
 
 int TQueuePair::SendRdmaReadWr(ui64 wrId, void* mrAddr, ui32 mrlKey, void* dstAddr, ui32 dstRkey, ui32 dstSize) noexcept {
     ibv_sge sg = {
@@ -597,6 +701,10 @@ int TQueuePair::SendRdmaReadWr(ui64 wrId, void* mrAddr, ui32 mrlKey, void* dstAd
 
 int TQueuePair::PostSend(struct ::ibv_send_wr *wr, struct ::ibv_send_wr **bad_wr) noexcept {
     return ibv_post_send(Qp, wr, bad_wr);
+}
+
+int TQueuePair::PostRecv(struct ::ibv_recv_wr *wr, struct ::ibv_recv_wr **bad_wr) noexcept {
+    return ibv_post_recv(Qp, wr, bad_wr);
 }
 
 ui32 TQueuePair::GetQpNum() const noexcept {
@@ -726,7 +834,7 @@ void Out<ibv_qp_state>(IOutputStream& os, ibv_qp_state state) {
         case IBV_QPS_UNKNOWN:
             os << "QPS_UNKNOWN";
             break;
-        default: 
+        default:
             Y_DEBUG_ABORT_UNLESS(false, "unknown qp state");
             os << "???";
     }
@@ -739,7 +847,7 @@ void Out<std::unique_ptr<NInterconnect::NRdma::TQueuePair>>(IOutputStream& os, c
         qp->Output(os);
         os << "]";
     } else {
-        os << "[none]"; 
+        os << "[none]";
     }
 }
 
@@ -755,7 +863,7 @@ void Out<std::shared_ptr<NInterconnect::NRdma::TQueuePair>>(IOutputStream& os, c
         qp->Output(os);
         os << "]";
     } else {
-        os << "[none]"; 
+        os << "[none]";
     }
 }
 

@@ -2,8 +2,16 @@
 #include "interconnect_tcp_session.h"
 #include "interconnect_handshake.h"
 #include "interconnect_zc_processor.h"
+#include "rdma_connection_registry.h"
+#include "rdma_qp_registry.h"
+#include "interconnect_rdma_api.h"
+#include "rdma_memory_region.h"
 
 #include <ydb/library/actors/core/probes.h>
+
+extern "C" {
+#include <infiniband/verbs.h>
+}
 #include <ydb/library/actors/core/log.h>
 #include <ydb/library/actors/core/interconnect.h>
 #include <ydb/library/actors/util/datetime.h>
@@ -92,11 +100,35 @@ namespace NActors {
         Terminate(TDisconnectReason());
     }
 
+    // External cleanup for RECV buffers (defined in interconnect_handshake.cpp)
+    extern std::mutex g_HandshakeRecvBuffersLock;
+    extern std::unordered_map<ui32, std::vector<TRcBuf>> g_HandshakeRecvBuffers;
+
     void TInterconnectSessionTCP::Terminate(TDisconnectReason reason) {
         LOG_INFO_IC_SESSION("ICS01", "socket: %" PRIi64 " reason# %s", (Socket ? i64(*Socket) : -1), reason.ToString().data());
 
         if (Qp) {
+            ui32 qpNum = Qp->GetQpNum();
+
             Qp->ToErrorState();
+
+            // Unregister RDMA connection from global registries since QP is now in error state
+            NActors::TRdmaConnectionRegistry::Instance().Unregister(Proxy->PeerNodeId);
+            NActors::TRdmaQpRegistry::Instance().Unregister(qpNum);
+
+            LOG_INFO_IC_SESSION("ICRDMA06", "Unregistered RDMA connection for node %u (qpNum=%u) due to session termination",
+                Proxy->PeerNodeId, qpNum);
+
+            // Clean up RECV buffers (posted during handshake)
+            {
+                std::lock_guard<std::mutex> lock(g_HandshakeRecvBuffersLock);
+                auto it = g_HandshakeRecvBuffers.find(qpNum);
+                if (it != g_HandshakeRecvBuffers.end()) {
+                    LOG_INFO_IC_SESSION("ICRDMA07", "Cleaning up %zu RECV buffers for qpNum=%u",
+                        it->second.size(), qpNum);
+                    g_HandshakeRecvBuffers.erase(it);
+                }
+            }
         }
         IActor::InvokeOtherActor(*Proxy, &TInterconnectProxyTCP::UnregisterSession, this);
         ShutdownSocket(std::move(reason));
@@ -275,6 +307,28 @@ namespace NActors {
             RdmaCtx = qp ? qp->GetCtx() : nullptr;
             if (RdmaCtx) {
                 Qp = qp;
+
+                // Register RDMA connection in global registry
+                if (ev->Get()->PeerQpNum != 0 && (ev->Get()->PeerGid[0] != 0 || ev->Get()->PeerGid[1] != 0)) {
+                    TRdmaConnectionInfo connInfo;
+                    connInfo.Qp = Qp;
+                    connInfo.Cq = cq;
+                    connInfo.PeerQpNum = ev->Get()->PeerQpNum;
+                    memcpy(connInfo.PeerGid, ev->Get()->PeerGid, sizeof(connInfo.PeerGid));
+                    connInfo.RdmaDeviceIndex = RdmaCtx->GetDeviceIndex();
+
+                    NActors::TRdmaConnectionRegistry::Instance().Register(
+                        Proxy->PeerNodeId,
+                        connInfo
+                    );
+
+                    // Also register by QP number for CQ RECV completion handling
+                    TRdmaQpInfo qpInfo(Qp, cq, RdmaCtx->GetDeviceIndex());
+                    NActors::TRdmaQpRegistry::Instance().Register(Qp->GetQpNum(), qpInfo);
+
+                    LOG_INFO_IC_SESSION("ICRDMA03", "Registered RDMA connection for peerNode=%u, localQp=%u, peerQp=%u, device=%zd (RECV buffers already posted during handshake)",
+                        Proxy->PeerNodeId, Qp->GetQpNum(), ev->Get()->PeerQpNum, RdmaCtx->GetDeviceIndex());
+                }
             }
         }
 
@@ -1144,20 +1198,6 @@ namespace NActors {
             lastpair.first += GetCycleCountFast();
 
         OutputStuckFlag = state;
-
-        if (state) {
-            if (++Proxy->Common->NumSessionsWithDataInQueue == 1) {
-                const ui64 ts = GetCycleCountFast();
-                const ui64 prevts = Proxy->Common->CyclesOnLastSwitch.exchange(ts);
-                Proxy->Common->CyclesWithZeroSessions += ts - prevts;
-            }
-        } else {
-            if (!--Proxy->Common->NumSessionsWithDataInQueue) {
-                const ui64 ts = GetCycleCountFast();
-                const ui64 prevts = Proxy->Common->CyclesOnLastSwitch.exchange(ts);
-                Proxy->Common->CyclesWithNonzeroSessions += ts - prevts;
-            }
-        }
     }
 
     void TInterconnectSessionTCP::SwitchStuckPeriod() {

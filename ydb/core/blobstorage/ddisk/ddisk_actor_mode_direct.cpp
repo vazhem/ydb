@@ -22,7 +22,7 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
     const char* operationName = isRead ? "READ" : "WRITE";
 
     // Create child span for ProcessDirectIORequest
-    NWilson::TSpan processSpan(TWilson::BlobStorage, std::move(ev->TraceId.Clone()), 
+    NWilson::TSpan processSpan(TWilson::BlobStorage, std::move(ev->TraceId.Clone()),
         isRead ? "DDisk.Read.ProcessDirectIORequest" : "DDisk.Write.ProcessDirectIORequest");
 
     const auto* msg = ev->Get();
@@ -55,7 +55,7 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
             response->Record.SetChunkId(chunkId);
             ctx.Send(ev->Sender, response.release(), 0, ev->Cookie);
         }
-        
+
         // End process span with error
         processSpan.EndError(errorReason);
     };
@@ -184,21 +184,36 @@ void TDDiskDirectIOActor::ProcessDirectIORequest(
     // Create span for async I/O operation before creating completion
     NWilson::TSpan asyncIOSpan = processSpan.CreateChild(TWilson::BlobStorage,
         isRead ? "DDisk.Read.PreadAsync" : "DDisk.Write.PwriteAsync");
-    
+
     // Set span attribute for size
     asyncIOSpan.Attribute("size_kb", alignedSize / 1024);
+
+    // Extract RDMA metadata for read operations
+    ui64 rdmaResponseAddr = 0;
+    ui32 rdmaResponseRkey = 0;
+    if constexpr (isRead) {
+        if (msg->Record.HasRdmaResponseAddr() && msg->Record.HasRdmaResponseRkey()) {
+            rdmaResponseAddr = msg->Record.GetRdmaResponseAddr();
+            rdmaResponseRkey = msg->Record.GetRdmaResponseRkey();
+            LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
+                "🔧 RDMA metadata detected in read request: addr=" << (void*)rdmaResponseAddr
+                << " rkey=" << rdmaResponseRkey);
+        }
+    }
 
     // Create simple completion handler that properly manages the buffer
     // Move the span into the completion (don't access asyncIOSpan after this)
     auto completion = new TDirectIOCompletion(ctx.SelfID, ev->Sender, ev->Cookie,
         originalRequestId, chunkId, offset, size, offsetAdjustment,
         isRead, alignedData, alignedSize,
-        std::move(asyncIOSpan));
-    
+        std::move(asyncIOSpan),
+        rdmaResponseAddr, rdmaResponseRkey);
+
     LOG_DEBUG_S(ctx, NKikimrServices::BS_DDISK,
         "🔧 DDIRECT COMPLETION CREATED: VDiskSlotId=" << Config->BaseInfo.VDiskSlotId
         << " action=" << (void*)completion << " isRead=" << isRead << " TraceId=" << traceIdStr
-        << " RequestId=" << originalRequestId);
+        << " RequestId=" << originalRequestId
+        << " HasRdmaMetadata=" << (rdmaResponseAddr != 0));
 
     // Safety checks to prevent crashes
     if (alignedSize == 0 || alignedSize > (1024 * 1024 * 1024)) {  // Max 1GB

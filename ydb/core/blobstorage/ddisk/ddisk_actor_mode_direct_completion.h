@@ -31,11 +31,17 @@ private:
     mutable std::atomic<bool> ExecutedOrReleased{false};
     NWilson::TSpan Span;  // Wilson tracing span for this operation
 
+    // RDMA metadata for read responses
+    ui64 RdmaResponseAddr;  // Remote memory address for RDMA WRITE (for read responses)
+    ui32 RdmaResponseRkey;  // Remote key for RDMA WRITE
+    bool HasRdmaMetadata;   // Whether RDMA metadata is present
+
 public:
     TDirectIOCompletion(const TActorId& ddiskActorId, const TActorId& originalSender,
                        ui64 originalCookie, ui64 requestId, TChunkIdx chunkIdx, ui32 originalOffset,
                        ui32 originalSize, ui32 offsetAdjustment, bool isRead,
-                       char* alignedBuffer, ui32 alignedSize, NWilson::TSpan&& span)
+                       char* alignedBuffer, ui32 alignedSize, NWilson::TSpan&& span,
+                       ui64 rdmaResponseAddr = 0, ui32 rdmaResponseRkey = 0)
         : DDiskActorId(ddiskActorId)
         , OriginalSender(originalSender)
         , OriginalCookie(originalCookie)
@@ -48,6 +54,9 @@ public:
         , AlignedBuffer(alignedBuffer)
         , AlignedSize(alignedSize)
         , Span(std::move(span))
+        , RdmaResponseAddr(rdmaResponseAddr)
+        , RdmaResponseRkey(rdmaResponseRkey)
+        , HasRdmaMetadata(rdmaResponseAddr != 0)
     {
         // Initialize base class TCompletionAction fields
         OperationIdx = 0;  // Will be set by PDisk when operation is scheduled

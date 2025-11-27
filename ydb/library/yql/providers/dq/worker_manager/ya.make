@@ -13,6 +13,7 @@ PEERDIR(
     ydb/library/yql/providers/dq/task_runner
     ydb/library/yql/providers/dq/task_runner_actor
     ydb/library/yql/providers/dq/worker_manager/interface
+    ydb/library/actors/wilson
 )
 
 YQL_LAST_ABI_VERSION()

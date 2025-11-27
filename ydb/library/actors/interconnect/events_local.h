@@ -184,7 +184,9 @@ namespace NActors {
                 TSessionParams params,
                 TIntrusivePtr<NInterconnect::TStreamSocket> xdcSocket,
                 std::shared_ptr<NInterconnect::NRdma::TQueuePair> qp,
-                NInterconnect::NRdma::ICq::TPtr cqPtr)
+                NInterconnect::NRdma::ICq::TPtr cqPtr,
+                ui32 peerQpNum = 0,
+                const ui64 peerGid[2] = nullptr)
             : Socket(std::move(socket))
             , Peer(peer)
             , Self(self)
@@ -194,7 +196,15 @@ namespace NActors {
             , XdcSocket(std::move(xdcSocket))
             , Qp(std::move(qp))
             , CqPtr(std::move(cqPtr))
+            , PeerQpNum(peerQpNum)
         {
+            if (peerGid) {
+                PeerGid[0] = peerGid[0];
+                PeerGid[1] = peerGid[1];
+            } else {
+                PeerGid[0] = 0;
+                PeerGid[1] = 0;
+            }
         }
 
         TIntrusivePtr<NInterconnect::TStreamSocket> Socket;
@@ -206,6 +216,8 @@ namespace NActors {
         TIntrusivePtr<NInterconnect::TStreamSocket> XdcSocket;
         std::shared_ptr<NInterconnect::NRdma::TQueuePair> Qp;
         NInterconnect::NRdma::ICq::TPtr CqPtr;
+        ui32 PeerQpNum;
+        ui64 PeerGid[2];
     };
 
     struct TEvHandshakeFail: public TEventLocal<TEvHandshakeFail, ui32(ENetwork::HandshakeFail)> {

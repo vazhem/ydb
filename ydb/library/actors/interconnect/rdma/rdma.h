@@ -6,10 +6,11 @@
 
 extern "C" {
 struct ibv_qp;
-struct ibv_cq; 
+struct ibv_cq;
 struct ibv_wc;
-union ibv_gid; 
+union ibv_gid;
 struct ibv_send_wr;
+struct ibv_recv_wr;
 }
 
 namespace NActors {
@@ -59,7 +60,7 @@ public:
 
     // Alloc ibv work request and set callback to notify complition.
     // returns TBusy in case of no prepare requests
-    // returns TErr in case of fatal CQ error. NOTE!!! The callback might be called in this case with TCqErr 
+    // returns TErr in case of fatal CQ error. NOTE!!! The callback might be called in this case with TCqErr
     virtual TAllocResult AllocWr(std::function<void(NActors::TActorSystem* as, TEvRdmaIoDone*)> cb) noexcept = 0;
     virtual std::optional<TErr> DoWrBatchAsync(std::shared_ptr<TQueuePair> qp, std::unique_ptr<IIbVerbsBuilder> builder) noexcept = 0;
     virtual TWrStats GetWrStats() const noexcept = 0;
@@ -103,9 +104,11 @@ public:
     int Init(TRdmaCtx* ctx, ICq* cq, int maxWr) noexcept;
     int ToErrorState() noexcept;
     int ToResetState() noexcept;
+    int ToInitState(TRdmaCtx* ctx) noexcept;
     int ToRtsState(TRdmaCtx* ctx, ui32 qpNum, const ibv_gid& gid, int mtuIndex) noexcept;
     int SendRdmaReadWr(ui64 wrId, void* mrAddr, ui32 mrlKey, void* dstAddr, ui32 dstRkey, ui32 dstSize) noexcept;
     int PostSend(struct ::ibv_send_wr *wr, struct ::ibv_send_wr **bad_wr) noexcept;
+    int PostRecv(struct ::ibv_recv_wr *wr, struct ::ibv_recv_wr **bad_wr) noexcept;
     ui32 GetQpNum() const noexcept;
     void Output(IOutputStream&) const noexcept;
     TQpState GetState(bool forseUpdate) const noexcept;

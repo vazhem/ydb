@@ -1,0 +1,66 @@
+import "ydb/library/actors/protos/actors.proto";
+
+package NActorsInterconnect;
+option java_package = "ru.yandex.kikimr.proto";
+
+// RDMA Memory Region
+message TRdmaMemoryRegion {
+    optional uint64 Address = 1;  // Remote memory address
+    optional uint32 Lkey = 2;     // Local key for RDMA access
+    optional uint32 Rkey = 3;     // Remote key for RDMA access
+    optional uint32 Size = 4;     // Size of the region
+}
+
+// RDMA Write Command - source provides data location, target reads via RDMA
+message TEvRdmaWriteCommand {
+    optional uint64 Cookie = 1;                      // Request identifier for matching request/response
+    optional NActorsProto.TActorId ResponseTarget = 2;  // Where to send the ack
+    optional NActorsProto.TActorId FinalTarget = 3;     // Final actor to receive notification (e.g., DDisk)
+
+    // Source data location (target will RDMA_READ from here)
+    optional TRdmaMemoryRegion SourceRegion = 4;
+
+    // Application-specific payload (serialized embedded event, e.g., TEvDDiskWriteRequest)
+    optional bytes ApplicationPayload = 5;
+
+    // Embedded event type (for reconstruction)
+    optional uint32 EmbeddedEventType = 6;
+
+    // Should CQ automatically execute RDMA_READ and only notify target after completion?
+    optional bool AutoExecuteRdmaRead = 7 [default = false];
+}
+
+// RDMA Write Acknowledgment
+message TEvRdmaWriteAck {
+    optional uint64 Cookie = 1;
+    optional int32 ErrorCode = 2 [default = 0];  // 0 = success, non-zero = error
+    optional string ErrorMessage = 3;
+    optional bytes ApplicationResponse = 4;  // Optional application-specific response
+}
+
+// RDMA Read Command - source provides buffer location, target writes via RDMA
+message TEvRdmaReadCommand {
+    optional uint64 Cookie = 1;                      // Request identifier
+    optional NActorsProto.TActorId ResponseTarget = 2;  // Where to send the ack
+    optional NActorsProto.TActorId FinalTarget = 3;     // Final actor to receive notification
+
+    // Destination buffer location (target will RDMA_WRITE to here)
+    optional TRdmaMemoryRegion DestinationRegion = 4;
+
+    // Application-specific payload (serialized embedded event, e.g., TEvDDiskReadRequest)
+    optional bytes ApplicationPayload = 5;
+
+    // Embedded event type (for reconstruction)
+    optional uint32 EmbeddedEventType = 6;
+
+    // Should CQ automatically execute RDMA_WRITE and only notify target after completion?
+    optional bool AutoExecuteRdmaWrite = 7 [default = false];
+}
+
+// RDMA Read Acknowledgment
+message TEvRdmaReadAck {
+    optional uint64 Cookie = 1;
+    optional int32 ErrorCode = 2 [default = 0];  // 0 = success, non-zero = error
+    optional string ErrorMessage = 3;
+    optional bytes ApplicationResponse = 4;  // Optional application-specific response
+}

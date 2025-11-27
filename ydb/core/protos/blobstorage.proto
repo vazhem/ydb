@@ -1598,6 +1598,10 @@ message TEvDDiskReadRequest {
     optional uint64 Offset = 1;
     optional uint32 Size = 2;
     optional uint32 ChunkId = 3;  // Chunk ID where to read from
+
+    // RDMA memory region info for response data transfer
+    optional uint64 RdmaResponseAddr = 4;  // Remote memory address for RDMA WRITE (on source node)
+    optional uint32 RdmaResponseRkey = 5;  // Remote key for RDMA WRITE
 }
 
 message TEvDDiskWriteRequest {
@@ -1605,6 +1609,10 @@ message TEvDDiskWriteRequest {
     optional uint32 Size = 2;
     optional bytes Data = 3;
     optional uint32 ChunkId = 4;  // Chunk ID where to write to
+
+    // RDMA memory region info for write data transfer
+    optional uint64 RdmaDataAddr = 5;  // Remote memory address for RDMA READ (on source node)
+    optional uint32 RdmaDataRkey = 6;  // Remote key for RDMA READ
 }
 
 message TEvDDiskReadResponse {

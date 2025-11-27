@@ -17,6 +17,8 @@ ENDIF()
 
 PEERDIR(
     ydb/library/actors/interconnect/rdma/ibdrv
+    ydb/library/actors/interconnect/rdma_data_transfer_proto
+    ydb/library/actors/protos
     ydb/library/actors/util
     contrib/libs/protobuf
 )

@@ -7,6 +7,7 @@
 #include "cq_actor.h"
 #include "rdma/mem_pool.h"
 #include "rdma/events.h"
+#include "rdma_memory_region.h"
 
 #include <ydb/library/actors/core/actor_coroutine.h>
 #include <ydb/library/actors/core/log.h>
@@ -18,8 +19,122 @@
 
 #include <variant>
 
+extern "C" {
+#include <infiniband/verbs.h>
+}
+
 namespace NActors {
     static constexpr size_t StackSize = 64 * 1024; // 64k should be enough
+
+    // Constants for RECV buffer management
+    constexpr size_t IC_RDMA_RECV_BUFFER_COUNT = 64;
+    constexpr size_t IC_RDMA_RECV_BUFFER_SIZE = 4096;
+
+    // Global storage for RECV buffers - keeps them alive
+    std::mutex g_HandshakeRecvBuffersLock;
+    std::unordered_map<ui32, std::vector<TRcBuf>> g_HandshakeRecvBuffers;
+
+    // Post RECV buffers before QP transitions to RTS
+    static bool PostRecvBuffersBeforeRTS(
+        std::shared_ptr<NInterconnect::NRdma::TQueuePair> qp,
+        NInterconnect::NRdma::TRdmaCtx* rdmaCtx,
+        TActorSystem* actorSystem)
+    {
+        if (!qp) {
+            Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: QP is null" << Endl;
+            return false;
+        }
+        if (!rdmaCtx) {
+            Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: RdmaCtx is null (qpNum=" << qp->GetQpNum() << ")" << Endl;
+            return false;
+        }
+        if (!actorSystem) {
+            Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: ActorSystem is null (qpNum=" << qp->GetQpNum() << ")" << Endl;
+            return false;
+        }
+
+        auto* allocator = actorSystem->GetRcBufAllocator();
+        if (!allocator) {
+            Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: No RDMA allocator available (qpNum=" << qp->GetQpNum() << ")" << Endl;
+            return false;
+        }
+
+        ui32 qpNum = qp->GetQpNum();
+        ssize_t deviceIndex = rdmaCtx->GetDeviceIndex();
+
+        Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: Starting for qpNum=" << qpNum
+             << ", deviceIndex=" << deviceIndex << Endl;
+
+        std::vector<TRcBuf> recvBuffers;
+        recvBuffers.reserve(IC_RDMA_RECV_BUFFER_COUNT);
+
+        size_t successCount = 0;
+        for (size_t i = 0; i < IC_RDMA_RECV_BUFFER_COUNT; ++i) {
+            // Allocate RECV buffer
+            std::optional<TRcBuf> bufOpt = allocator->AllocRcBuf(IC_RDMA_RECV_BUFFER_SIZE, 0, 0);
+            if (!bufOpt.has_value()) {
+                Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: Failed to allocate RECV buffer " << (i + 1) << "/" << IC_RDMA_RECV_BUFFER_COUNT << " (qpNum=" << qpNum << ")" << Endl;
+                break;
+            }
+
+            TRcBuf buf = std::move(bufOpt.value());
+
+            // Extract RDMA region
+            auto regionOpt = ExtractRdmaRegionFromRcBuf(buf, deviceIndex);
+            if (!regionOpt) {
+                Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: Failed to extract RDMA region " << (i + 1) << "/" << IC_RDMA_RECV_BUFFER_COUNT << " (qpNum=" << qpNum << ", deviceIndex=" << deviceIndex << ")" << Endl;
+                break;
+            }
+
+            auto& region = *regionOpt;
+
+            // Log first buffer details
+            if (i == 0) {
+                Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: First buffer - addr=" << static_cast<void*>((void*)region.Address)
+                     << ", length=" << region.Size
+                     << ", lkey=" << region.Lkey << Endl;
+            }
+
+            // Post RECV work request
+            struct ibv_sge sge;
+            memset(&sge, 0, sizeof(sge));
+            sge.addr = region.Address;
+            sge.length = region.Size;
+            sge.lkey = region.Lkey;
+
+            struct ibv_recv_wr recvWr, *bad_wr = nullptr;
+            memset(&recvWr, 0, sizeof(recvWr));
+            // wr_id is just the buffer index - QP number is available in ibv_wc.qp_num
+            recvWr.wr_id = i;
+            recvWr.sg_list = &sge;
+            recvWr.num_sge = 1;
+
+            int result = qp->PostRecv(&recvWr, &bad_wr);
+            if (result != 0) {
+                Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: Failed to post RECV WR " << (i + 1) << "/" << IC_RDMA_RECV_BUFFER_COUNT
+                     << " (qpNum=" << qpNum << ", errno=" << result << ": " << strerror(result)
+                     << ", addr=" << static_cast<void*>((void*)region.Address)
+                     << ", length=" << region.Size
+                     << ", lkey=" << region.Lkey << ")" << Endl;
+                break;
+            }
+
+            successCount++;
+            recvBuffers.push_back(std::move(buf));
+        }
+
+        if (successCount > 0) {
+            // Store buffers globally to keep them alive
+            std::lock_guard<std::mutex> lock(g_HandshakeRecvBuffersLock);
+            g_HandshakeRecvBuffers[qpNum] = std::move(recvBuffers);
+
+            Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: Successfully posted " << successCount << "/" << IC_RDMA_RECV_BUFFER_COUNT << " RECV buffers (qpNum=" << qpNum << ")" << Endl;
+        } else {
+            Cerr << "ICRDMA: PostRecvBuffersBeforeRTS: Failed to post any RECV buffers (qpNum=" << qpNum << ")" << Endl;
+        }
+
+        return successCount > 0;
+    }
 
     class THandshakeActor
        : public TActorCoroImpl
@@ -253,6 +368,8 @@ namespace NActors {
         NInterconnect::NRdma::ICq::TPtr RdmaCq;
         NInterconnect::NRdma::TMemRegionPtr HandShakeMemRegion; // region which will be read by RDMA during handshake
         static const size_t RdmaHandshakeRegionSize = 4096;
+        ui32 PeerRdmaQpNum = 0;
+        ui64 PeerRdmaGid[2] = {0, 0};
 
     public:
         THandshakeActor(TInterconnectProxyCommon::TPtr common, const TActorId& self, const TActorId& peer,
@@ -407,7 +524,8 @@ namespace NActors {
                 ExternalDataChannel.ResetPollerToken();
                 Y_ABORT_UNLESS(!ExternalDataChannel == !Params.UseExternalDataChannel);
                 SendToProxy(MakeHolder<TEvHandshakeDone>(std::move(MainChannel.GetSocketRef()), PeerVirtualId, SelfVirtualId,
-                    *NextPacketFromPeer, ProgramInfo->Release(), std::move(Params), std::move(ExternalDataChannel.GetSocketRef()), std::move(RdmaQp), RdmaCq));
+                    *NextPacketFromPeer, ProgramInfo->Release(), std::move(Params), std::move(ExternalDataChannel.GetSocketRef()), std::move(RdmaQp), RdmaCq,
+                    PeerRdmaQpNum, PeerRdmaGid));
             }
 
             MainChannel.Reset();
@@ -497,16 +615,53 @@ namespace NActors {
             gid.global.interface_id = proto.GetInterfaceId();
             gid.global.subnet_prefix = proto.GetSubnetPrefix();
             auto mtuIndex = std::min((ui32)proto.GetMtuIndex(), (ui32)RdmaCtx->GetPortAttr().active_mtu);
-            int err = RdmaQp->ToRtsState(RdmaCtx, proto.GetQpNum(), gid, (ibv_mtu)mtuIndex);
+
+            // Step 1: Transition QP from RESET to INIT (required before posting RECV)
+            LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_INFO,
+                "Transitioning QP to INIT state before posting RECV (qpNum=%u)", RdmaQp->GetQpNum());
+
+            int err = RdmaQp->ToInitState(RdmaCtx);
             if (err) {
-                TStringBuilder sb;
-                sb << gid;
+                success.SetRdmaErr("Unable to promote QP to INIT state");
+                LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_ERROR,
+                    "Unable to promote QP to INIT, err: %d (%s)", err, strerror(err));
+                RdmaQp.reset();
+                return;
+            }
+
+            // Step 2: Post RECV buffers (now that QP is in INIT state)
+            LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_INFO,
+                "Posting RECV buffers (qpNum=%u is now in INIT state)", RdmaQp->GetQpNum());
+
+            if (!PostRecvBuffersBeforeRTS(RdmaQp, RdmaCtx, TActivationContext::ActorSystem())) {
+                success.SetRdmaErr("Failed to post RECV buffers");
+                LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_ERROR,
+                    "Failed to post RECV buffers for qpNum=%u", RdmaQp->GetQpNum());
+                RdmaQp.reset();
+                return;
+            }
+
+            // Step 3: Continue transitioning QP from INIT -> RTR -> RTS
+            LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_INFO,
+                "Successfully posted RECV buffers, now transitioning to RTS");
+
+            err = RdmaQp->ToRtsState(RdmaCtx, proto.GetQpNum(), gid, (ibv_mtu)mtuIndex);
+            TStringBuilder sb;
+            sb << gid;
+            if (err) {
                 success.SetRdmaErr("Unable to promote QP to RTS on the incomming side");
                 LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_ERROR,
                     "Unable to promote QP to RTS, err: %d (%s), gid: %s", err, strerror(err), sb.data());
                 RdmaQp.reset();
                 return;
             }
+            LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_INFO,
+                    "Promoted QP to RTS with RECV buffers posted, gid: %s", sb.data());
+            // Store peer QP number and GID for registration
+            PeerRdmaQpNum = proto.GetQpNum();
+            PeerRdmaGid[0] = gid.global.subnet_prefix;
+            PeerRdmaGid[1] = gid.global.interface_id;
+
             auto rdmaHsResp = success.MutableQpPrepared();
             rdmaHsResp->SetQpNum(RdmaQp->GetQpNum());
             const auto& localGid = RdmaCtx->GetGid();
@@ -793,13 +948,13 @@ namespace NActors {
                 }
             }
 
-            return rdmaReadAck; 
+            return rdmaReadAck;
         }
 
         bool WaitRdmaReadResult() {
             NActorsInterconnect::TRdmaHandshakeReadAck rdmaReadAck;
             ReceiveExBlock(MainChannel, rdmaReadAck, "WaitRdmaReadResult");
-            ui32 crc = Crc32cExtendMSanCompatible(0, HandShakeMemRegion->GetAddr(), RdmaHandshakeRegionSize); 
+            ui32 crc = Crc32cExtendMSanCompatible(0, HandShakeMemRegion->GetAddr(), RdmaHandshakeRegionSize);
             return rdmaReadAck.GetDigest() == crc;
         }
 
@@ -1012,13 +1167,43 @@ namespace NActors {
                 }
 
                 if (RdmaQp && success.HasQpPrepared()) {
-                    const auto& remoteQpPrepared = success.GetQpPrepared(); 
+                    const auto& remoteQpPrepared = success.GetQpPrepared();
                     LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_TRACE,
                         "peer has prepared qp: %d", remoteQpPrepared.GetQpNum());
                     ibv_gid gid;
                     gid.global.interface_id = remoteQpPrepared.GetInterfaceId();
                     gid.global.subnet_prefix = remoteQpPrepared.GetSubnetPrefix();
-                    int err = RdmaQp->ToRtsState(RdmaCtx,remoteQpPrepared.GetQpNum(), gid, (ibv_mtu)remoteQpPrepared.GetMtuIndex());
+
+                    // Step 1: Transition QP from RESET to INIT (required before posting RECV)
+                    LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_INFO,
+                        "Transitioning QP to INIT state before posting RECV (qpNum=%u, outgoing)", RdmaQp->GetQpNum());
+
+                    int err = RdmaQp->ToInitState(RdmaCtx);
+                    if (err) {
+                        LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_ERROR,
+                            "Unable to promote QP to INIT, err: %d (%s) (outgoing)", err, strerror(err));
+                        RdmaQp.reset();
+                        HandShakeMemRegion.Reset();
+                        Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "Failed to transition QP to INIT");
+                    }
+
+                    // Step 2: Post RECV buffers (now that QP is in INIT state)
+                    LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_INFO,
+                        "Posting RECV buffers (qpNum=%u is now in INIT state, outgoing)", RdmaQp->GetQpNum());
+
+                    if (!PostRecvBuffersBeforeRTS(RdmaQp, RdmaCtx, TActivationContext::ActorSystem())) {
+                        LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_ERROR,
+                            "Failed to post RECV buffers for qpNum=%u (outgoing)", RdmaQp->GetQpNum());
+                        RdmaQp.reset();
+                        HandShakeMemRegion.Reset();
+                        Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "Failed to post RECV buffers");
+                    }
+
+                    // Step 3: Continue transitioning QP from INIT -> RTR -> RTS
+                    LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_INFO,
+                        "Successfully posted RECV buffers, now transitioning to RTS (outgoing)");
+
+                    err = RdmaQp->ToRtsState(RdmaCtx,remoteQpPrepared.GetQpNum(), gid, (ibv_mtu)remoteQpPrepared.GetMtuIndex());
                     if (err) {
                         TStringBuilder sb;
                         sb << gid;
@@ -1026,6 +1211,19 @@ namespace NActors {
                                 "Unable to promote QP to RTS, err: %d (%s), gid: %s", err, strerror(err), sb.data());
                         RdmaQp.reset();
                         HandShakeMemRegion.Reset();
+                    } else {
+                        // Store peer QP number and GID for registration
+                        PeerRdmaQpNum = remoteQpPrepared.GetQpNum();
+                        PeerRdmaGid[0] = gid.global.subnet_prefix;
+                        PeerRdmaGid[1] = gid.global.interface_id;
+
+                        TStringBuilder sb;
+                        sb << gid;
+                        LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_INFO,
+                            "Promoted QP to RTS with RECV buffers posted (outgoing), gid: %s", sb.data());
+
+                        LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_DEBUG,
+                            "PerformOutgoingHandshake: Promoted QP to RTS, gid: %s", sb.data());
                     }
                     Params.ChecksumRdmaEvent = remoteQpPrepared.GetRdmaChecksum();
                 } else {
@@ -1345,15 +1543,18 @@ namespace NActors {
 
                     if (rdmaIncommingHandshake) {
                         TryRdmaQpExchange(rdmaIncommingHandshake.value(), success);
-                        if (RdmaQp && rdmaIncommingHandshake->HasRead()) {
-                            rdma = rdmaIncommingHandshake->GetRead();
-                        }
-                        if (rdmaIncommingHandshake->HasRdmaChecksum() && rdmaIncommingHandshake->GetRdmaChecksum() == true) {
-                            Params.ChecksumRdmaEvent = Common->Settings.RdmaChecksum;
-                            success.MutableQpPrepared()->SetRdmaChecksum(Params.ChecksumRdmaEvent);
-                        } else {
-                            Params.ChecksumRdmaEvent = false;
-                            success.MutableQpPrepared()->SetRdmaChecksum(false);
+                        if (RdmaQp) {
+                            // Only access QpPrepared if RdmaQp is still valid
+                            if (rdmaIncommingHandshake->HasRead()) {
+                                rdma = rdmaIncommingHandshake->GetRead();
+                            }
+                            if (rdmaIncommingHandshake->HasRdmaChecksum() && rdmaIncommingHandshake->GetRdmaChecksum() == true) {
+                                Params.ChecksumRdmaEvent = Common->Settings.RdmaChecksum;
+                                success.MutableQpPrepared()->SetRdmaChecksum(Params.ChecksumRdmaEvent);
+                            } else {
+                                Params.ChecksumRdmaEvent = false;
+                                success.MutableQpPrepared()->SetRdmaChecksum(false);
+                            }
                         }
                     } else {
                         success.SetRdmaErr("Rdma is not ready on the incomming side");
@@ -1454,7 +1655,7 @@ namespace NActors {
             auto sockname = MainChannel.GetSocketRef()->GetSockName();
             switch (sockname.index()) {
                 case 0: {
-                    auto addr = std::get<0>(sockname).GetV6CompatAddr(); 
+                    auto addr = std::get<0>(sockname).GetV6CompatAddr();
                     RdmaCtx = NInterconnect::NRdma::NLinkMgr::GetCtx(addr);
                     if (RdmaCtx) {
                         LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICRDMA", NLog::PRI_TRACE,
@@ -1468,7 +1669,7 @@ namespace NActors {
                 case 1:
                     LOG_ERROR_IC("ICRDMA", "Unable to get local address for socket: %d. Rdma will not be used",
                         (int)(*MainChannel.GetSocketRef()));
-                    break; 
+                    break;
             }
 
             if (RdmaCtx) {

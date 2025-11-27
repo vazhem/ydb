@@ -9,6 +9,7 @@ SRCS(
     ddisk_actor_mode_direct_completion.cpp
     ddisk_worker_actor.cpp
     skeleton/ddisk_skeletonfront.cpp
+    ddisk_events_rdma_registration.cpp
 )
 
 PEERDIR(
@@ -16,6 +17,7 @@ PEERDIR(
     ydb/core/blobstorage/base
     ydb/core/blobstorage/groupinfo
     ydb/core/blobstorage/pdisk
+    ydb/library/actors/interconnect
 )
 
 END()
