@@ -18,14 +18,30 @@ using TEvReadResult = NKikimrBlobStorage::NDDisk::TEvReadResult;
 TDirectBlockGroup::TDirectBlockGroup(
     NActors::TActorSystem* actorSystem,
     ui64 tabletId,
+    ui64 directBlockGroupId,
     ui32 generation,
     TVector<NBsController::TDDiskId> ddisksIds,
-    TVector<NBsController::TDDiskId> persistentBufferDDiskIds)
+    TVector<NBsController::TDDiskId> persistentBufferDDiskIds,
+    NMonitoring::TDynamicCounterPtr counters,
+    const TString& ddiskPoolName,
+    const TString& diskId)
     : ActorSystem(actorSystem)
     , TabletId(tabletId)
+    , DirectBlockGroupId(directBlockGroupId)
     , StorageTransport(
           std::make_unique<NTransport::TICStorageTransport>(actorSystem))
+    , Counters(nullptr)
 {
+    Y_UNUSED(DirectBlockGroupId);
+
+    if (counters) {
+        Counters = std::make_shared<TDirectBlockGroupCounters>(
+            counters,
+            ddiskPoolName,
+            diskId,
+            tabletId,
+            directBlockGroupId);
+    }
     Y_ASSERT(
         persistentBufferDDiskIds.size() == TDirectBlockGroup::DDisksNumber);
     Y_ASSERT(ddisksIds.size() == TDirectBlockGroup::DDisksNumber);
@@ -344,6 +360,13 @@ void TDirectBlockGroup::DoWriteBlocksLocal(
         const ui64 storageRequestId = ++StorageRequestId;
         const auto& ddiskConnection = PersistentBufferConnections[i];
 
+        // Track WritePersistentBuffer request started
+        if (Counters) {
+            Counters->WritePersistentBufferStarted(
+                i,
+                requestHandler->GetSize());
+        }
+
         auto& childSpan = requestHandler->GetChildSpan(storageRequestId, i);
         auto future = StorageTransport->WritePersistentBuffer(
             ddiskConnection.GetServiceId(),
@@ -360,8 +383,23 @@ void TDirectBlockGroup::DoWriteBlocksLocal(
         requestHandler->OnWriteRequested(storageRequestId, i, storageRequestId);
         future.Subscribe(
             [requestHandler,
-             storageRequestId](const TEvWritePersistentBufferResultFuture& f) {
-                requestHandler->OnWriteFinished(storageRequestId, f.GetValue());
+             storageRequestId,
+             counters = Counters,
+             persistentBufferId =
+                 i](const TEvWritePersistentBufferResultFuture& f)
+            {
+                const auto& result = f.GetValue();
+
+                // Track WritePersistentBuffer request finished
+                if (counters) {
+                    bool ok = result.GetStatus() ==
+                              NKikimrBlobStorage::NDDisk::TReplyStatus::OK;
+                    counters->WritePersistentBufferFinished(
+                        persistentBufferId,
+                        ok);
+                }
+
+                requestHandler->OnWriteFinished(storageRequestId, result);
             });
 
         execSpan.Event("PB request end");
@@ -392,6 +430,19 @@ void TDirectBlockGroup::SyncWithPersistentBuffer(
     const auto& persistentBufferConnection =
         PersistentBufferConnections[persistentBufferIndex];
 
+    // Calculate total bytes for the sync request
+    ui32 totalBytes = 0;
+    for (const auto& selector: requestHandler->GetBlockSelectors()) {
+        totalBytes += selector.Size;
+    }
+
+    // Track SyncWithPersistentBuffer request started
+    if (Counters) {
+        Counters->SyncWithPersistentBufferStarted(
+            persistentBufferIndex,
+            totalBytes);
+    }
+
     const ui64 storageRequestId = ++StorageRequestId;
     auto& childSpan = requestHandler->GetChildSpan(storageRequestId);
     auto future = StorageTransport->SyncWithPersistentBuffer(
@@ -408,6 +459,13 @@ void TDirectBlockGroup::SyncWithPersistentBuffer(
 
     const auto& resultOrError = executor->ResultOrError(std::move(future));
     if (HasError(resultOrError)) {
+        // Track failure
+        if (Counters) {
+            Counters->SyncWithPersistentBufferFinished(
+                persistentBufferIndex,
+                false);
+        }
+
         // TODO: add error handling
         requestHandler->ChildSpanEndError(
             storageRequestId,
@@ -429,7 +487,17 @@ void TDirectBlockGroup::HandleSyncWithPersistentBufferResult(
     ui64 storageRequestId,
     const NKikimrBlobStorage::NDDisk::TEvSyncWithPersistentBufferResult& result)
 {
-    if (result.GetStatus() == NKikimrBlobStorage::NDDisk::TReplyStatus::OK) {
+    bool ok =
+        result.GetStatus() == NKikimrBlobStorage::NDDisk::TReplyStatus::OK;
+
+    // Track SyncWithPersistentBuffer request finished
+    if (Counters) {
+        Counters->SyncWithPersistentBufferFinished(
+            requestHandler->GetPersistentBufferIndex(),
+            ok);
+    }
+
+    if (ok) {
         requestHandler->ChildSpanEndOk(storageRequestId);
         requestHandler->Span.EndOk();
 
@@ -452,13 +520,26 @@ void TDirectBlockGroup::ErasePersistentBuffer(
     TExecutorPtr executor,
     std::shared_ptr<TEraseRequestHandler> requestHandler)
 {
+    auto persistentBufferIndex = requestHandler->GetPersistentBufferIndex();
+
+    // Calculate total bytes for the erase request
+    ui32 totalBytes = 0;
+    for (const auto& selector: requestHandler->GetBlockSelectors()) {
+        totalBytes += selector.Size;
+    }
+
+    // Track ErasePersistentBuffer request started
+    if (Counters) {
+        Counters->ErasePersistentBufferStarted(
+            persistentBufferIndex,
+            totalBytes);
+    }
+
     const ui64 storageRequestId = ++StorageRequestId;
     auto& childSpan = requestHandler->GetChildSpan(storageRequestId);
     auto future = StorageTransport->ErasePersistentBuffer(
-        PersistentBufferConnections[requestHandler->GetPersistentBufferIndex()]
-            .GetServiceId(),
-        PersistentBufferConnections[requestHandler->GetPersistentBufferIndex()]
-            .Credentials,
+        PersistentBufferConnections[persistentBufferIndex].GetServiceId(),
+        PersistentBufferConnections[persistentBufferIndex].Credentials,
         requestHandler->GetBlockSelectors(),
         requestHandler->GetLsns(),
         childSpan);
@@ -469,6 +550,13 @@ void TDirectBlockGroup::ErasePersistentBuffer(
             std::move(requestHandler),
             storageRequestId,
             resultOrError.GetResult());
+    } else {
+        // Track failure
+        if (Counters) {
+            Counters->ErasePersistentBufferFinished(
+                persistentBufferIndex,
+                false);
+        }
     }
     // TODO: add error handling
 }
@@ -485,7 +573,17 @@ void TDirectBlockGroup::HandleErasePersistentBufferResult(
         NWilson::EFlags::NONE,
         ActorSystem);
 
-    if (result.GetStatus() == NKikimrBlobStorage::NDDisk::TReplyStatus::OK) {
+    bool ok =
+        result.GetStatus() == NKikimrBlobStorage::NDDisk::TReplyStatus::OK;
+
+    // Track ErasePersistentBuffer request finished
+    if (Counters) {
+        Counters->ErasePersistentBufferFinished(
+            requestHandler->GetPersistentBufferIndex(),
+            ok);
+    }
+
+    if (ok) {
         requestHandler->ChildSpanEndOk(storageRequestId);
         requestHandler->Span.EndOk();
     } else {
@@ -573,6 +671,13 @@ void TDirectBlockGroup::DoReadBlocksLocalFromPersistentBuffer(
     const auto& ddiskConnection =
         PersistentBufferConnections[persistentBufferIndex];
 
+    // Track ReadPersistentBuffer request started
+    if (Counters) {
+        Counters->ReadPersistentBufferStarted(
+            persistentBufferIndex,
+            requestHandler->GetSize());
+    }
+
     auto& childSpan =
         requestHandler->GetChildSpan(storageRequestId, persistentBufferIndex);
 
@@ -593,14 +698,25 @@ void TDirectBlockGroup::DoReadBlocksLocalFromPersistentBuffer(
     future.Subscribe(
         [actorSystem = ActorSystem,
          requestHandler = std::move(requestHandler),
-         storageRequestId]   //
+         storageRequestId,
+         counters = Counters,
+         persistentBufferId = static_cast<ui64>(persistentBufferIndex)]   //
         (const TFuture<TEvReadPersistentBufferResult>& f) mutable
         {
+            const auto& result = f.GetValue();
+
+            // Track ReadPersistentBuffer request finished
+            if (counters) {
+                bool ok = result.GetStatus() ==
+                          NKikimrBlobStorage::NDDisk::TReplyStatus::OK;
+                counters->ReadPersistentBufferFinished(persistentBufferId, ok);
+            }
+
             HandleReadResult(
                 actorSystem,
                 std::move(requestHandler),
                 storageRequestId,
-                f.GetValue());
+                result);
         });
 }
 
@@ -666,6 +782,13 @@ void TDirectBlockGroup::HandleReadResult(
         requestHandler->Span.EndOk();
     } else {
         // TODO: add error handling
+        LOG_ERROR_S(
+            *actorSystem,
+            NKikimrServices::NBS_PARTITION,
+            "HandleReadResult failed, storageRequestId: "
+                << storageRequestId
+                << ", status: " << static_cast<int>(result.GetStatus())
+                << ", error: " << result.GetErrorReason());
         requestHandler->ChildSpanEndError(
             storageRequestId,
             "HandleReadResult failed");

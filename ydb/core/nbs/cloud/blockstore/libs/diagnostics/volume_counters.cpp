@@ -1,6 +1,8 @@
 
 #include "volume_counters.h"
 
+#include <ydb/core/base/counters.h>
+
 namespace NYdb::NBS::NBlockStore {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -34,14 +36,24 @@ void TVolumeRequestCounters::RequestFinished(bool ok)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TVolumeCounters::TVolumeCounters(NMonitoring::TDynamicCounterPtr parent)
-    : ReadBlocks(
-          parent ? parent->GetSubgroup("operation", "ReadBlocks") : nullptr)
-    , WriteBlocks(
-          parent ? parent->GetSubgroup("operation", "WriteBlocks") : nullptr)
-    , ZeroBlocks(
-          parent ? parent->GetSubgroup("operation", "ZeroBlocks") : nullptr)
-{}
+TVolumeCounters::TVolumeCounters(
+    NMonitoring::TDynamicCounterPtr parent,
+    const TString& diskId)
+    : ReadBlocks(nullptr)
+    , WriteBlocks(nullptr)
+    , ZeroBlocks(nullptr)
+{
+    if (parent && !diskId.empty()) {
+        parent = parent->GetSubgroup("diskId", diskId);
+    }
+
+    ReadBlocks = TVolumeRequestCounters(
+        parent ? parent->GetSubgroup("operation", "ReadBlocks") : nullptr);
+    WriteBlocks = TVolumeRequestCounters(
+        parent ? parent->GetSubgroup("operation", "WriteBlocks") : nullptr);
+    ZeroBlocks = TVolumeRequestCounters(
+        parent ? parent->GetSubgroup("operation", "ZeroBlocks") : nullptr);
+}
 
 void TVolumeCounters::RequestStarted(EBlockStoreRequest requestType, ui32 bytes)
 {

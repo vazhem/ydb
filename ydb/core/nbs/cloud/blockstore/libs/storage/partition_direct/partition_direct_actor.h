@@ -105,7 +105,10 @@ private:
         const NActors::TActorContext& ctx,
         const TPartitionIds& ids);
 
-    TVector<IDirectBlockGroupPtr> CreateDirectBlockGroups(TPartitionIds ids);
+    TVector<IDirectBlockGroupPtr> CreateDirectBlockGroups(
+        TPartitionIds ids,
+        NMonitoring::TDynamicCounterPtr counters,
+        const TString& diskId);
 };
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -46,15 +46,18 @@ TFastPathService::TFastPathService(
     ui32 generation,
     std::shared_ptr<NStorage::NPartitionDirect::TRegion> region,
     const NProto::TStorageServiceConfig& storageConfig,
+    const TString& diskId,
     TIntrusivePtr<NMonitoring::TDynamicCounters> counters)
     : ActorSystem(actorSystem)
     , Region(std::move(region))
     , TraceSamplePeriod(
           TDuration::MilliSeconds(storageConfig.GetTraceSamplePeriod()))
-    , Counters(MakeCountersChain(
-          std::move(counters),
-          storageConfig.GetDDiskPoolName(),
-          tabletId))
+    , Counters(
+          MakeCountersChain(
+              std::move(counters),
+              storageConfig.GetDDiskPoolName(),
+              tabletId),
+          diskId)
 {
     Y_UNUSED(ActorSystem);
     Y_UNUSED(generation);

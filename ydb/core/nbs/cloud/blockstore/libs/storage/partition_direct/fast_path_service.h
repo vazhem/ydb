@@ -32,6 +32,7 @@ public:
         ui32 generation,
         std::shared_ptr<TRegion> region,
         const NProto::TStorageServiceConfig& storageConfig,
+        const TString& diskId,
         TIntrusivePtr<NMonitoring::TDynamicCounters> counters = nullptr);
 
     ~TFastPathService() override = default;

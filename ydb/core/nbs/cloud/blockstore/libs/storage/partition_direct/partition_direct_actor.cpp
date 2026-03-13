@@ -5,6 +5,7 @@
 
 #include <ydb/core/nbs/cloud/blockstore/bootstrap/nbs_service.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/common/constants.h>
+#include <ydb/core/nbs/cloud/blockstore/libs/diagnostics/direct_block_group_counters.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/storage/api/service.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/storage/partition_direct/protos/partition_direct.pb.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/storage/partition_direct/region.h>
@@ -12,6 +13,7 @@
 
 #include <ydb/core/nbs/cloud/storage/core/libs/actors/helpers.h>
 
+#include <ydb/core/base/counters.h>
 #include <ydb/core/base/tablet_pipe.h>
 #include <ydb/core/base/tabletid.h>
 #include <ydb/core/mind/bscontroller/types.h>
@@ -244,7 +246,9 @@ bool TPartitionActor::HaveStoredTabletInfo()
 }
 
 TVector<IDirectBlockGroupPtr> TPartitionActor::CreateDirectBlockGroups(
-    TPartitionIds ids)
+    TPartitionIds ids,
+    NMonitoring::TDynamicCounterPtr counters,
+    const TString& diskId)
 {
     Y_ASSERT(ids.size() == NumDirectBlockGroups);
     TVector<IDirectBlockGroupPtr> directBlockGroups;
@@ -257,9 +261,13 @@ TVector<IDirectBlockGroupPtr> TPartitionActor::CreateDirectBlockGroups(
         directBlockGroups.emplace_back(std::make_shared<TDirectBlockGroup>(
             TActivationContext::ActorSystem(),
             TabletID(),
+            i,   // directBlockGroupId
             1,   // generation
             std::move(ddiskIds),
-            std::move(persistentBufferDDiskIds)));
+            std::move(persistentBufferDDiskIds),
+            counters,
+            StorageConfig.GetDDiskPoolName(),
+            diskId));
     }
 
     return directBlockGroups;
@@ -385,12 +393,13 @@ void TPartitionActor::Start(
 {
     LOG_INFO(ctx, NKikimrServices::NBS_PARTITION, "starting partition_direct");
 
+    TString diskId = VolumeConfig.GetDiskId();
+
     TVector<IDirectBlockGroupPtr> directBlockGroups =
-        CreateDirectBlockGroups(std::move(ids));
+        CreateDirectBlockGroups(std::move(ids), AppData()->Counters, diskId);
     auto region = std::make_shared<TRegion>(
         std::move(directBlockGroups),
-        3   // syncRequestsBatchSize
-    );
+        StorageConfig.GetSyncRequestsBatchSize());
 
     auto fastPathService = std::make_shared<TFastPathService>(
         TActivationContext::ActorSystem(),
@@ -398,6 +407,7 @@ void TPartitionActor::Start(
         1,   // generation
         std::move(region),
         StorageConfig,
+        diskId,
         AppData()->Counters);
 
     LoadActorAdapter = CreateLoadActorAdapter(ctx.SelfID, fastPathService);
@@ -405,7 +415,6 @@ void TPartitionActor::Start(
     {
         auto service = GetNbsService();
 
-        TString diskId = VolumeConfig.GetDiskId();
         ui32 blockSize = VolumeConfig.GetBlockSize();
         ui64 blockCount = 0;
         for (const auto& p: VolumeConfig.GetPartitions()) {

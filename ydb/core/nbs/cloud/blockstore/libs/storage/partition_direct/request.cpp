@@ -171,6 +171,13 @@ void TWriteRequestHandler::OnWriteFinished(
         }
     } else {
         // TODO: add error handling
+        LOG_ERROR_S(
+            *GetActorSystem(),
+            NKikimrServices::NBS_PARTITION,
+            "HandleWritePersistentBufferResult failed, requestId: "
+                << requestId
+                << ", status: " << static_cast<int>(result.GetStatus())
+                << ", error: " << result.GetErrorReason());
         ChildSpanEndError(
             requestId,
             "HandleWritePersistentBufferResult failed");

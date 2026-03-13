@@ -36,8 +36,6 @@ message CreatePartitionRequest {
 
     // Disk id.
     string DiskId = 6;
-
-    uint32 SyncRequestsBatchSize = 7;
 }
 
 message CreatePartitionResponse {

@@ -1,6 +1,7 @@
 LIBRARY()
 
 SRCS(
+    direct_block_group_counters.cpp
     public.cpp
     vhost_stats_simple.cpp
     vhost_stats_test.cpp

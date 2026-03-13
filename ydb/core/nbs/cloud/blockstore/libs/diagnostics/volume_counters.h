@@ -30,6 +30,7 @@ public:
 };
 
 ////////////////////////////////////////////////////////////////////////////////
+
 class TVolumeCounters
 {
 private:
@@ -38,7 +39,9 @@ private:
     TVolumeRequestCounters ZeroBlocks;
 
 public:
-    explicit TVolumeCounters(NMonitoring::TDynamicCounterPtr parent);
+    explicit TVolumeCounters(
+        NMonitoring::TDynamicCounterPtr parent,
+        const TString& diskId = "");
 
     void RequestStarted(EBlockStoreRequest requestType, ui32 bytes);
     void RequestFinished(EBlockStoreRequest requestType, bool ok);

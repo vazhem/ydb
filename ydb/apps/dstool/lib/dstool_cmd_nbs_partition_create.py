@@ -11,7 +11,6 @@ def add_options(p):
     p.add_argument('--block-size', type=int, default=4096, help='Block size in bytes')
     p.add_argument('--blocks-count', type=int, default=262144, help='Count of blocks in partition')
     p.add_argument('--type', type=str, default="ssd", help='Type of partition: ssd/mem')
-    p.add_argument('--sync-requests-batch-size', type=int, default=100, help='Sync requests batch size')
 
 
 def is_successful_response(response):
@@ -27,8 +26,7 @@ def do(args):
                                          BlockSize=args.block_size,
                                          BlocksCount=args.blocks_count,
                                          StoragePoolName=args.pool,
-                                         StorageMedia=args.type,
-                                         SyncRequestsBatchSize=args.sync_requests_batch_size)
+                                         StorageMedia=args.type)
     response = common.invoke_nbs_request('CreatePartition', request)
 
     common.print_nbs_request_result(args, request, response)

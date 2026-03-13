@@ -2,6 +2,7 @@
 
 #include "request.h"
 
+#include <ydb/core/nbs/cloud/blockstore/libs/diagnostics/direct_block_group_counters.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/service/public.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/service/storage.h>
 #include <ydb/core/nbs/cloud/blockstore/libs/storage/storage_transport/storage_transport.h>
@@ -100,20 +101,26 @@ private:
     TVector<TDDiskConnection> PersistentBufferConnections;
 
     ui64 TabletId;
+    ui64 DirectBlockGroupId;
     ui64 StorageRequestId = 0;
     static constexpr ui32 DDisksNumber = 5;
 
     bool Initialized = false;
 
     std::unique_ptr<NTransport::IStorageTransport> StorageTransport;
+    std::shared_ptr<TDirectBlockGroupCounters> Counters;
 
 public:
     TDirectBlockGroup(
         NActors::TActorSystem* actorSystem,
         ui64 tabletId,
+        ui64 directBlockGroupId,
         ui32 generation,
         TVector<NKikimr::NBsController::TDDiskId> ddisksIds,
-        TVector<NKikimr::NBsController::TDDiskId> persistentBufferDDiskIds);
+        TVector<NKikimr::NBsController::TDDiskId> persistentBufferDDiskIds,
+        NMonitoring::TDynamicCounterPtr counters,
+        const TString& ddiskPoolName,
+        const TString& diskId);
 
     ~TDirectBlockGroup() override = default;
 
