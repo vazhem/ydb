@@ -48,10 +48,21 @@ private:
     bool DdiskBlockGroupAllocated = false;
 
 public:
-    static constexpr size_t NumDirectBlockGroups = 32;
     TPartitionActor(
         const NActors::TActorId& tablet,
         NKikimr::TTabletStorageInfo* info);
+
+    // Calculate the number of direct block groups based on the maximum write IOPS.
+    // 1k IOPS = 1 direct block group.
+    size_t GetNumDirectBlockGroups() const
+    {
+        const ui32 maxWriteIops =
+            VolumeConfig.GetPerformanceProfileMaxWriteIops();
+        if (maxWriteIops == 0) {
+            return 32;
+        }
+        return (maxWriteIops + 999) / 1000;
+    }
 
     static constexpr ui32 LogComponent = NKikimrServices::NBS_PARTITION;
     using TCounters = TPartitionCounters;

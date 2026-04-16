@@ -38,6 +38,9 @@ message CreatePartitionRequest {
     string DiskId = 6;
 
     uint32 SyncRequestsBatchSize = 7;
+
+    // Maximum write IOPS for performance profile (1k IOPS = 1 direct block group)
+    uint32 PerformanceProfileMaxWriteIops = 8;
 }
 
 message CreatePartitionResponse {

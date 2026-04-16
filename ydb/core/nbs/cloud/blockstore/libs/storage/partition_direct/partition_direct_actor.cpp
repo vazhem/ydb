@@ -148,10 +148,11 @@ TVector<IDirectBlockGroupPtr> TPartitionActor::CreateDirectBlockGroups(
     TDirectBlockGroupsConnections directBlockGroupsConnections)
 {
     TVector<IDirectBlockGroupPtr> directBlockGroups;
+    const size_t numDirectBlockGroups = GetNumDirectBlockGroups();
     auto executors =
-        GetNbsService()->ExecutorPool.GetExecutors(NumDirectBlockGroups);
+        GetNbsService()->ExecutorPool.GetExecutors(numDirectBlockGroups);
 
-    for (size_t i = 0; i < NumDirectBlockGroups; i++) {
+    for (size_t i = 0; i < numDirectBlockGroups; i++) {
         const auto& conn =
             directBlockGroupsConnections.GetDirectBlockGroupConnections(i);
         TVector<NBsController::TDDiskId> ddiskIds;
@@ -210,7 +211,8 @@ void TPartitionActor::AllocateDDiskBlockGroup(const NActors::TActorContext& ctx)
         AlignUp(blockCount * VolumeConfig.GetBlockSize(), RegionSize) /
         RegionSize;
 
-    for (size_t i = 0; i < NumDirectBlockGroups; i++) {
+    const size_t numDirectBlockGroups = GetNumDirectBlockGroups();
+    for (size_t i = 0; i < numDirectBlockGroups; i++) {
         auto* query = request->Record.AddQueries();
         query->SetDirectBlockGroupId(i);
         query->SetTargetNumVChunks(regionsCount);
@@ -287,11 +289,12 @@ void TPartitionActor::HandleControllerAllocateDDiskBlockGroupResult(
         msg->Record.DebugString().data());
 
     if (msg->Record.GetStatus() == NKikimrProto::EReplyStatus::OK) {
+        const size_t numDirectBlockGroups = GetNumDirectBlockGroups();
         Y_ABORT_UNLESS(
-            msg->Record.GetResponses().size() == NumDirectBlockGroups);
+            msg->Record.GetResponses().size() == numDirectBlockGroups);
 
         TDirectBlockGroupsConnections ids;
-        for (size_t i = 0; i < NumDirectBlockGroups; i++) {
+        for (size_t i = 0; i < numDirectBlockGroups; i++) {
             auto* directBlockGroupConnections =
                 ids.AddDirectBlockGroupConnections();
             const auto& response = msg->Record.GetResponses()[i];

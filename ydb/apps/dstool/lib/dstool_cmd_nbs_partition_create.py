@@ -12,6 +12,7 @@ def add_options(p):
     p.add_argument('--blocks-count', type=int, default=262144, help='Count of blocks in partition')
     p.add_argument('--type', type=str, default="ssd", help='Type of partition: ssd/mem')
     p.add_argument('--sync-requests-batch-size', type=int, default=100, help='Sync requests batch size')
+    p.add_argument('--max-write-iops', type=int, default=32000, help='Maximum write IOPS (1k IOPS = 1 direct block group)')
 
 
 def is_successful_response(response):
@@ -28,7 +29,8 @@ def do(args):
                                          BlocksCount=args.blocks_count,
                                          StoragePoolName=args.pool,
                                          StorageMedia=args.type,
-                                         SyncRequestsBatchSize=args.sync_requests_batch_size)
+                                         SyncRequestsBatchSize=args.sync_requests_batch_size,
+                                         PerformanceProfileMaxWriteIops=args.max_write_iops)
     response = common.invoke_nbs_request('CreatePartition', request)
 
     common.print_nbs_request_result(args, request, response)

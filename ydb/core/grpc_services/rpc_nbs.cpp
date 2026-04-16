@@ -57,6 +57,7 @@ public:
         const ui64 blocksCount = request->GetBlocksCount() ? request->GetBlocksCount() : 32768;
         const ui32 storageMedia = request->GetStorageMedia();
         const ui32 syncRequestsBatchSize = request->GetSyncRequestsBatchSize();
+        const ui32 maxWriteIops = request->GetPerformanceProfileMaxWriteIops();
 
         NYdb::NBS::NProto::TStorageServiceConfig storageConfig;
         storageConfig.SetDDiskPoolName(storagePoolName);
@@ -87,6 +88,9 @@ public:
         volumeConfig.SetStorageMediaKind(NYdb::NBS::NProto::STORAGE_MEDIA_SSD);
         volumeConfig.SetTabletVersion(3);
         volumeConfig.SetStoragePoolName(storagePoolName);
+        if (maxWriteIops > 0) {
+            volumeConfig.SetPerformanceProfileMaxWriteIops(maxWriteIops);
+        }
 
         auto createVolumeRequest = std::make_unique<TEvSSProxy::TEvCreateVolumeRequest>(
             std::move(volumeConfig));
