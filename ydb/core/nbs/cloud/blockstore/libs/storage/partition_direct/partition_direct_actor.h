@@ -19,6 +19,8 @@
 
 #include <ydb/library/services/services.pb.h>
 
+#include <cmath>
+
 namespace NYdb::NBS::NBlockStore::NStorage::NPartitionDirect {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -52,17 +54,9 @@ public:
         const NActors::TActorId& tablet,
         NKikimr::TTabletStorageInfo* info);
 
-    // Calculate the number of direct block groups based on the maximum write IOPS.
-    // 1k IOPS = 1 direct block group.
-    size_t GetNumDirectBlockGroups() const
-    {
-        const ui32 maxWriteIops =
-            VolumeConfig.GetPerformanceProfileMaxWriteIops();
-        if (maxWriteIops == 0) {
-            return 32;
-        }
-        return (maxWriteIops + 999) / 1000;
-    }
+    // Calculate the number of direct block groups
+    size_t GetNumDirectBlockGroups() const;
+
 
     static constexpr ui32 LogComponent = NKikimrServices::NBS_PARTITION;
     using TCounters = TPartitionCounters;
@@ -122,5 +116,19 @@ private:
 };
 
 ////////////////////////////////////////////////////////////////////////////////
+
+// Calculate number of direct block groups from IOPS.
+// NumDirectBlockGroups is always set to power of 2
+// greater than or equal to kIops.
+inline size_t CalculateNumDirectBlockGroupsFromIops(ui32 maxWriteIops)
+{
+    if (maxWriteIops == 0) {
+        return 32;
+    }
+    size_t kIops = (maxWriteIops + 999) / 1000;
+
+    // Calculate the smallest power of 2 greater than or equal to kIops
+    return 1 << static_cast<size_t>(std::ceil(std::log2(kIops)));
+}
 
 }   // namespace NYdb::NBS::NBlockStore::NStorage::NPartitionDirect

@@ -291,7 +291,8 @@ void TPartitionActor::HandleControllerAllocateDDiskBlockGroupResult(
     if (msg->Record.GetStatus() == NKikimrProto::EReplyStatus::OK) {
         const size_t numDirectBlockGroups = GetNumDirectBlockGroups();
         Y_ABORT_UNLESS(
-            msg->Record.GetResponses().size() == numDirectBlockGroups);
+            msg->Record.GetResponses().size() ==
+            static_cast<int>(numDirectBlockGroups));
 
         TDirectBlockGroupsConnections ids;
         for (size_t i = 0; i < numDirectBlockGroups; i++) {
@@ -387,6 +388,14 @@ void TPartitionActor::HandleUpdateVolumeConfig(
             << ", txId: " << response->Record.GetTxId() << ", status: OK");
 
     ctx.Send(ev->Sender, response.release());
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+size_t TPartitionActor::GetNumDirectBlockGroups() const
+{
+    return CalculateNumDirectBlockGroupsFromIops(
+        VolumeConfig.GetPerformanceProfileMaxWriteIops());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
