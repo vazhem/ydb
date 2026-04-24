@@ -3,15 +3,51 @@
 Automated deployment script for YDB NBS cluster testing.
 Pulls latest changes, builds, deploys, and runs tests on cluster.
 Supports multi-host, multi-disk configuration.
+
+Cron setup (run every 5 minutes):
+
+    crontab -e
+
+Add the line (adjust paths and log dir as needed):
+
+    */5 * * * * /usr/bin/flock -n /tmp/deploy_on_cluster.lock \
+        /home/vazhenin-mv/ydbwork/ydb/ydb/core/nbs/scripts/deploy_on_cluster.py \
+        --log-dir /home/vazhenin-mv/deploy_logs \
+        >> /home/vazhenin-mv/deploy_cron.log 2>&1
+
+Notes:
+  * `flock -n` makes cron skip the tick if a previous run is still active.
+    The script also enforces its own lock via fcntl and will exit 0 if
+    another instance is already running.
+  * A log file is created under --log-dir ONLY if the script actually
+    deploys to the cluster and runs fio (not when it exits early because
+    there are no relevant changes).
+  * The whole run is capped at 3 hours; if it doesn't finish in time the
+    script exits with a non-zero code.
+  * After a successful run, a report with p90 clat latencies per fio test
+    is emailed to vazhenin-mv@yandex-team.ru.
 """
 
 import subprocess
 import sys
 import os
 import time
+import re
+import signal
+import fcntl
+import datetime
+import socket
+import shlex
+import json
+import threading
 import yaml
 from pathlib import Path
-from typing import List, Tuple, Dict, Set
+from typing import List, Tuple, Dict, Optional, Any
+
+
+SCRIPT_TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours
+LOCK_FILE_PATH = "/tmp/deploy_on_cluster.lock"
+REPORT_EMAIL = "vazhenin-mv@yandex-team.ru"
 
 
 class DeploymentConfig:
@@ -39,7 +75,13 @@ class DeploymentConfig:
     NUM_DISKS = 8  # Number of disks to create (disk1-diskN)
     DISK_PREFIX = "disk"
     DISK_POOL = "ddp1"
-    
+
+    # Unified-Agent / log_config fields populated from cluster config YAML.
+    # Mirrors LogConfig in AppConfig proto used by ydbd.
+    UA_URI: str = ""               # log_config.uaclient_config.uri
+    UA_LOG_NAME: str = "ydb"        # log_config.uaclient_config.log_name
+    CLUSTER_NAME: str = ""           # log_config.cluster_name
+
     @classmethod
     def load_cluster_config(cls):
         """Load cluster configuration from YAML file"""
@@ -50,6 +92,11 @@ class DeploymentConfig:
                 f"hosts:\n"
                 f"  - host1.example.com\n"
                 f"  - host2.example.com\n"
+                f"overridden_configs:\n"
+                f"  log_config:\n"
+                f"    cluster_name: nbs_load_cluster\n"
+                f"    uaclient_config:\n"
+                f"      uri: localhost:16400\n"
             )
         
         with open(cls.CLUSTER_CONFIG_PATH, 'r') as f:
@@ -60,9 +107,28 @@ class DeploymentConfig:
             raise ValueError(f"No hosts found in {cls.CLUSTER_CONFIG_PATH}")
         
         cls.GRPC_SERVER = cls.HOSTS[0]  # Use first host as GRPC server
+
+        # --- Unified Agent / log_config ---
+        overridden_configs = config.get('overridden_configs') or {}
+        log_config = overridden_configs.get('log_config') or {}
+        cls.CLUSTER_NAME = log_config.get('cluster_name', "") or ""
+        ua_cfg = log_config.get('uaclient_config') or {}
+        cls.UA_URI = ua_cfg.get('uri', "") or ""
+        cls.UA_LOG_NAME = ua_cfg.get('log_name', "ydb") or "ydb"
+
         ColorLogger.success(f"Loaded {len(cls.HOSTS)} hosts from cluster config")
         for i, host in enumerate(cls.HOSTS, 1):
             ColorLogger.info(f"  {i}. {host}")
+        if cls.UA_URI:
+            ColorLogger.info(
+                f"Unified Agent: uri={cls.UA_URI} "
+                f"cluster={cls.CLUSTER_NAME or '<empty>'} log_name={cls.UA_LOG_NAME}"
+            )
+        else:
+            ColorLogger.warning(
+                "No log_config.uaclient_config.uri in cluster config; "
+                "UA annotations will be disabled."
+            )
     
     @classmethod
     def get_disk_ids(cls) -> List[str]:
@@ -100,6 +166,494 @@ class ColorLogger:
     @staticmethod
     def step(step_num: int, msg: str):
         print(f"\n{ColorLogger.BOLD}[STEP {step_num}]{ColorLogger.ENDC} {msg}")
+
+
+class SingleInstanceLock:
+    """File-lock based guard ensuring only one instance of the script runs.
+
+    Uses fcntl.flock with LOCK_NB. The lock fd is kept open for the lifetime
+    of the process; exit() releases it automatically.
+    """
+
+    def __init__(self, path: str = LOCK_FILE_PATH):
+        self.path = path
+        self._fd = None
+
+    def acquire_or_exit(self):
+        self._fd = open(self.path, "w")
+        try:
+            fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            ColorLogger.warning(
+                f"Another instance is already running (lock: {self.path}). Exiting."
+            )
+            sys.exit(0)
+        self._fd.write(f"pid={os.getpid()}\nstarted={datetime.datetime.now().isoformat()}\n")
+        self._fd.flush()
+
+
+class TeeStream:
+    """File-like object that writes to two streams at once (stdout/stderr + log file)."""
+
+    def __init__(self, primary, secondary):
+        self._primary = primary
+        self._secondary = secondary
+
+    def write(self, data):
+        self._primary.write(data)
+        try:
+            self._secondary.write(data)
+            self._secondary.flush()
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        self._primary.flush()
+        try:
+            self._secondary.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        try:
+            return self._primary.isatty()
+        except Exception:
+            return False
+
+
+class DeploymentLogger:
+    """Lazy log file opener. File is created only on first activation.
+
+    This guarantees that no log file appears on disk when the script exits
+    early (e.g. no relevant changes detected).
+    """
+
+    def __init__(self, log_dir: Optional[Path]):
+        self.log_dir = Path(log_dir).expanduser() if log_dir else None
+        self.log_path: Optional[Path] = None
+        self._fh = None
+        self._orig_stdout = None
+        self._orig_stderr = None
+        self.activated = False
+
+    def activate(self, commit_sha: str, commit_subject: str) -> Optional[Path]:
+        """Open the log file and start tee'ing stdout/stderr into it."""
+        if self.activated:
+            return self.log_path
+        if self.log_dir is None:
+            return None
+
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.log_path = self.log_dir / f"deploy_{ts}.log"
+        self._fh = open(self.log_path, "w", buffering=1)
+
+        header = (
+            "=" * 80 + "\n"
+            f"Deployment log  :  {self.log_path}\n"
+            f"Start time      :  {datetime.datetime.now().isoformat()}\n"
+            f"Host            :  {socket.gethostname()}\n"
+            f"PID             :  {os.getpid()}\n"
+            f"Running commit  :  {commit_sha}\n"
+            f"Commit subject  :  {commit_subject}\n"
+            + "=" * 80 + "\n"
+        )
+        self._fh.write(header)
+        self._fh.flush()
+
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = TeeStream(self._orig_stdout, self._fh)
+        sys.stderr = TeeStream(self._orig_stderr, self._fh)
+        self.activated = True
+        return self.log_path
+
+    def close(self):
+        if not self.activated:
+            return
+        try:
+            sys.stdout = self._orig_stdout
+            sys.stderr = self._orig_stderr
+        finally:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+
+
+class ScriptTimeout(Exception):
+    pass
+
+
+def _install_timeout(seconds: int = SCRIPT_TIMEOUT_SECONDS):
+    """Install a hard wall-clock timeout that raises ScriptTimeout."""
+
+    def _handler(signum, frame):
+        raise ScriptTimeout(f"script exceeded {seconds}s timeout")
+
+    signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+
+
+# --- fio output parsing -----------------------------------------------------
+
+# Matches e.g. "90.00th=[  914]" inside the "clat percentiles (usec):" block.
+_CLAT_P90_RE = re.compile(r"90\.00th=\[\s*(\d+)\s*\]")
+_CLAT_HEADER_RE = re.compile(r"clat percentiles \((usec|msec|nsec)\)")
+
+
+def parse_fio_clat_p90(output: str) -> Optional[Tuple[int, str]]:
+    """Extract clat p90 latency from fio textual output.
+
+    Returns (value, unit) where unit is one of 'nsec', 'usec', 'msec'.
+    Returns None if not found.
+    """
+    unit = None
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        m_hdr = _CLAT_HEADER_RE.search(line)
+        if m_hdr:
+            unit = m_hdr.group(1)
+        if unit is None:
+            continue
+        m = _CLAT_P90_RE.search(line)
+        if m:
+            return int(m.group(1)), unit
+    return None
+
+
+def format_latency(value_unit: Optional[Tuple[int, str]]) -> str:
+    if value_unit is None:
+        return "n/a"
+    value, unit = value_unit
+    return f"{value} {unit}"
+
+
+# Matches either "IOPS=43.0k" or "IOPS=43000" anywhere in an fio summary line.
+_IOPS_RE = re.compile(r"IOPS=([\d.]+)([kKmM]?)")
+
+
+def parse_fio_iops(output: str) -> Optional[float]:
+    """Return IOPS as a float (in ops/sec) extracted from fio stdout."""
+    for line in output.splitlines():
+        # Prefer the summary line (starts with "  read:" / "  write:" etc.)
+        stripped = line.strip()
+        if not (stripped.startswith("read:") or stripped.startswith("write:")
+                or stripped.startswith("rw:") or "IOPS=" in stripped):
+            continue
+        m = _IOPS_RE.search(stripped)
+        if not m:
+            continue
+        value = float(m.group(1))
+        mult = {"": 1.0, "k": 1e3, "K": 1e3, "m": 1e6, "M": 1e6}[m.group(2)]
+        return value * mult
+    return None
+
+
+def format_iops(iops: Optional[float]) -> str:
+    if iops is None:
+        return "n/a"
+    if iops >= 1_000_000:
+        return f"{iops/1_000_000:.2f}M"
+    if iops >= 1_000:
+        return f"{iops/1_000:.1f}k"
+    return f"{iops:.0f}"
+
+
+# ---------------------------------------------------------------------------
+# Unified Agent annotator (SSH -> remote helper -> UA native gRPC stream)
+# ---------------------------------------------------------------------------
+# Unified Agent is not reachable from the machine running this script; it
+# listens on a `plugin: grpc` input on one of the cluster hosts. So we:
+#
+#   1. scp `ua_annotate.py` once to host 0 (done via deploy_ua_helper()).
+#   2. For every annotation build the message text and the common labels
+#      locally (so the `pid` / `host` / timestamp are taken from the
+#      deploy-script machine).
+#   3. SSH into host 0 and invoke
+#        python3 ~/ua_annotate.py --uri <UA uri>
+#                                 --message '<text>'
+#                                 --meta k=v ...
+#      The helper opens the native `UnifiedAgentService/Session` bidi gRPC
+#      stream (proto: library/cpp/unified_agent_client/proto/unified_agent.proto),
+#      sends Initialize + one DataBatch, waits for Ack, exits 0.
+#
+# Session meta mirrors what ydbd's UA backend puts into SessionParameters.Meta
+# (see log_backend_build.cpp::CreateLogBackendFromUAClientConfig):
+#     _pid, _log_name, node_type, database, cluster
+# plus a few OTEL-ish labels (project, service, host, level, component) and
+# any per-event `extra_labels`.
+#
+# The message payload is formatted the same way ydbd writes its own log
+# lines:  "<iso_ts> :<COMPONENT> <LEVEL>: <text>"
+# with COMPONENT = DEPLOY_SCRIPT for this script.
+
+DEPLOY_COMPONENT = "DEPLOY_SCRIPT"
+
+# Name + remote path of the helper script that we scp to host 0.
+UA_HELPER_SCRIPT_NAME = "ua_annotate.py"
+UA_HELPER_REMOTE_PATH = f"~/{UA_HELPER_SCRIPT_NAME}"
+
+
+def deploy_ua_helper(host: str) -> bool:
+    """scp `ua_annotate.py` next to the deploy script up to remote *host*.
+
+    Returns True on success. Best-effort -- any failure just means UA
+    annotations will be skipped for this run.
+    """
+    local_path = Path(__file__).resolve().parent / UA_HELPER_SCRIPT_NAME
+    if not local_path.exists():
+        ColorLogger.warning(f"UA helper not found: {local_path}")
+        return False
+
+    target = host if "@" in host else f"{DeploymentConfig.REMOTE_USER}@{host}"
+    scp_cmd = (
+        f"scp -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        f"-o LogLevel=ERROR "
+        f"{shlex.quote(str(local_path))} {target}:{UA_HELPER_REMOTE_PATH}"
+    )
+    rc, _, stderr = run_command(scp_cmd, check=False)
+    if rc != 0:
+        ColorLogger.warning(
+            f"Failed to scp UA helper to {host}: {stderr.strip()[:200]}"
+        )
+        return False
+
+    # Best-effort chmod; not required for `python3 script.py` invocation.
+    run_remote_command(
+        f"chmod +x {UA_HELPER_REMOTE_PATH}", host=host, check=False
+    )
+    ColorLogger.success(f"Deployed UA helper to {host}:{UA_HELPER_REMOTE_PATH}")
+    return True
+
+
+class UnifiedAgentAnnotator:
+    """Remote-Unified-Agent annotation client.
+
+    Records are built locally (so `host`, `pid`, timestamp reflect the deploy
+    host) and forwarded over SSH to a small helper living on `remote_host`,
+    which in turn opens a TCP connection to UA.
+
+    Any error along the way is swallowed with a warning -- annotations must
+    never break the deploy flow.
+    """
+
+    def __init__(
+        self,
+        uri: str,
+        cluster_name: str,
+        remote_host: Optional[str],
+        remote_user: Optional[str] = None,
+        remote_helper_path: str = UA_HELPER_REMOTE_PATH,
+        log_name: str = "ydb",
+        tenant: str = "",
+        node_type: str = "static",
+        project: str = "kikimr",
+        service: str = "ydb",
+        ssh_timeout: float = 15.0,
+    ):
+        self.uri = uri
+        self.cluster_name = cluster_name
+        self.log_name = log_name
+        self.tenant = tenant
+        self.node_type = node_type
+        self.project = project
+        self.service = service
+
+        self.remote_host = remote_host
+        self.remote_user = remote_user or DeploymentConfig.REMOTE_USER
+        self.remote_helper_path = remote_helper_path
+        self.ssh_timeout = ssh_timeout
+
+        fqdn = socket.getfqdn()
+        self.hostname_full = fqdn
+        self.hostname_short = fqdn.split(".")[0] if fqdn else socket.gethostname()
+        self.pid = os.getpid()
+
+        self._lock = threading.Lock()
+        self.enabled = bool(uri) and bool(remote_host)
+
+    # -- record construction ---------------------------------------------
+
+    def _build_message_and_meta(
+        self,
+        level: str,
+        text: str,
+        extra_labels: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, List[Tuple[str, str]]]:
+        """Return (message_payload, session_meta) for the UA helper.
+
+        The `message_payload` is the plain log-line text that UA will store
+        as the DataBatch payload, formatted identically to how ydbd writes
+        its own log lines: ``<iso_ts> :<COMPONENT> <LEVEL>: <text>``.
+
+        The `session_meta` list contains the common OTEL-style labels that
+        the ydbd UA backend puts into SessionParameters.Meta (see
+        ``log_backend_build.cpp::CreateLogBackendFromUAClientConfig``) plus
+        the top-level OTEL fields (project / service / host / level) and
+        any per-event ``extra_labels``.
+        """
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        iso_ts = (
+            now_utc.strftime("%Y-%m-%dT%H:%M:%S.")
+            + f"{now_utc.microsecond:06d}Z"
+        )
+        message = f"{text}"
+
+        # Session meta. Empty values are dropped to keep the CLI short.
+        meta_map: Dict[str, str] = {
+            # ydbd-style session meta (see C++ backend):
+            "_pid":        str(self.pid),
+            "_log_name":   self.log_name,
+            "node_type":   self.node_type,
+            "database":    self.tenant,
+            "cluster":     self.cluster_name,
+            # OTEL-ish common labels for the annotation:
+            "project":     self.project,
+            "service":     self.service,
+            "host":        self.hostname_short,
+            "hostname":    self.hostname_full,
+            "level":       level,
+            "component":   DEPLOY_COMPONENT,
+        }
+        if extra_labels:
+            for k, v in extra_labels.items():
+                if v is None:
+                    continue
+                meta_map[str(k)] = str(v)
+
+        meta_items = [(k, v) for k, v in meta_map.items() if v != ""]
+        return message, meta_items
+
+    # -- public api -------------------------------------------------------
+
+    def _ssh_target(self) -> str:
+        host = self.remote_host or ""
+        return host if "@" in host else f"{self.remote_user}@{host}"
+
+    def annotate(
+        self,
+        text: str,
+        level: str = "INFO",
+        extra_labels: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Send a single annotation. Best-effort; never raises."""
+        if not self.enabled:
+            return
+        try:
+            message, meta_items = self._build_message_and_meta(level, text, extra_labels)
+
+            # NOTE: do NOT shlex.quote `self.remote_helper_path` -- we want
+            # the remote shell to expand `~` / `$HOME` in it.
+            parts = [f"python3 {self.remote_helper_path}",
+                     "--uri",     shlex.quote(self.uri),
+                     "--timeout", str(int(self.ssh_timeout)),
+                     "--message", shlex.quote(message)]
+            for k, v in meta_items:
+                parts += ["--meta", shlex.quote(f"{k}={v}")]
+            remote_cmd = " ".join(parts)
+
+            ssh_cmd = [
+                "ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR",
+                "-o", "BatchMode=yes",
+                "-o", f"ConnectTimeout={int(self.ssh_timeout)}",
+                self._ssh_target(),
+                remote_cmd,
+            ]
+
+            with self._lock:
+                proc = subprocess.run(
+                    ssh_cmd,
+                    capture_output=True,
+                    timeout=self.ssh_timeout + 5,
+                )
+            if proc.returncode != 0:
+                stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+                ColorLogger.warning(
+                    f"UA annotate rc={proc.returncode}: {stderr[:200]}"
+                )
+            else:
+                ColorLogger.info(f"[UA] {level}: {text}")
+        except Exception as e:
+            ColorLogger.warning(f"UA annotate failed ({e}); continuing without it")
+
+    def close(self) -> None:
+        # No persistent connection to clean up; SSH processes are per-call.
+        return
+
+
+# Short human descriptions used in UA annotations.
+FIO_MODE_DESCRIPTIONS = {
+    "warmup":        "warmup 1m sequential write",
+    "4k_randwrite":  "4k random write",
+    "4k_randread":   "4k random read",
+    "4k_mixed":      "4k random mixed (50/50)",
+    "1m_seqwrite":   "1m sequential write",
+    "1m_seqread":    "1m sequential read",
+    "1m_mixed":      "1m sequential mixed (50/50)",
+}
+
+
+def send_email_report(subject: str, body: str, to_addr: str = REPORT_EMAIL) -> bool:
+    """Send an email report using the local `mail`/`sendmail` if available."""
+    # Try `mail` first (bsd-mailx/mailutils compatible).
+    for mailer in ("mail", "mailx", "/usr/bin/mail"):
+        mailer_bin = mailer if os.path.isabs(mailer) else _which(mailer)
+        if not mailer_bin:
+            continue
+        try:
+            proc = subprocess.run(
+                [mailer_bin, "-s", subject, to_addr],
+                input=body,
+                text=True,
+                capture_output=True,
+                timeout=60,
+            )
+            if proc.returncode == 0:
+                ColorLogger.success(f"Report emailed to {to_addr} via {mailer_bin}")
+                return True
+            else:
+                ColorLogger.warning(
+                    f"{mailer_bin} returned {proc.returncode}: {proc.stderr.strip()}"
+                )
+        except Exception as e:
+            ColorLogger.warning(f"Failed to send via {mailer_bin}: {e}")
+
+    # Fallback: /usr/sbin/sendmail -t
+    sendmail = "/usr/sbin/sendmail"
+    if os.path.exists(sendmail):
+        try:
+            msg = (
+                f"To: {to_addr}\n"
+                f"Subject: {subject}\n"
+                f"Content-Type: text/plain; charset=UTF-8\n"
+                f"\n"
+                f"{body}\n"
+            )
+            proc = subprocess.run(
+                [sendmail, "-t"], input=msg, text=True,
+                capture_output=True, timeout=60,
+            )
+            if proc.returncode == 0:
+                ColorLogger.success(f"Report emailed to {to_addr} via sendmail")
+                return True
+            ColorLogger.warning(f"sendmail rc={proc.returncode}: {proc.stderr.strip()}")
+        except Exception as e:
+            ColorLogger.warning(f"Failed to send via sendmail: {e}")
+
+    ColorLogger.error("No working mail transport found; report NOT sent")
+    return False
+
+
+def _which(binary: str) -> Optional[str]:
+    for path in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(path, binary)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def run_command(cmd: str, cwd: Path = None, check: bool = True, env: dict = None, interactive: bool = False) -> Tuple[int, str, str]:
@@ -205,88 +759,80 @@ def run_on_all_hosts(cmd: str, description: str = "", parallel: bool = True) -> 
     return results
 
 
-def git_pull() -> bool:
-    """Pull latest changes from git repo"""
+def git_pull() -> Tuple[str, str]:
+    """Pull latest changes from git repo.
+
+    Remembers the HEAD sha BEFORE the pull so that caller can diff across
+    every newly-pulled commit (not just the last one).
+
+    Returns:
+        (old_head, new_head) tuple of full SHAs. They are equal if nothing
+        was pulled.
+    """
     ColorLogger.step(1, "Git pull repo")
-    
+
     _, old_head, _ = run_command(
         "git rev-parse HEAD",
-        cwd=DeploymentConfig.REPO_PATH
+        cwd=DeploymentConfig.REPO_PATH,
     )
     old_head = old_head.strip()
-    
+
     run_command("git pull", cwd=DeploymentConfig.REPO_PATH)
-    
+
     _, new_head, _ = run_command(
         "git rev-parse HEAD",
-        cwd=DeploymentConfig.REPO_PATH
+        cwd=DeploymentConfig.REPO_PATH,
     )
     new_head = new_head.strip()
-    
+
     if old_head == new_head:
         ColorLogger.warning("No new commits pulled")
-        return False
-    
-    ColorLogger.success(f"Pulled commits: {old_head[:8]} -> {new_head[:8]}")
-    return True
+    else:
+        ColorLogger.success(f"Pulled commits: {old_head[:8]} -> {new_head[:8]}")
+
+    return old_head, new_head
+
+
+def get_commit_subject(sha: str) -> str:
+    """Return the subject line of a commit."""
+    _, stdout, _ = run_command(
+        f"git log -1 --pretty=format:%s {sha}",
+        cwd=DeploymentConfig.REPO_PATH,
+        check=False,
+    )
+    return stdout.strip()
 
 
 def check_changes_in_directories(old_commit: str, new_commit: str) -> bool:
-    """Check if any changes exist in watched directories"""
+    """Check if any watched dir changed across ALL commits between old..new.
+
+    This diffs old_commit..new_commit so every commit pulled in the most
+    recent `git pull` is covered, not just the very last one.
+    """
     ColorLogger.step(2, "Checking for changes in watched directories")
-    
+
+    if old_commit == new_commit:
+        ColorLogger.warning("HEAD did not move; nothing to check")
+        return False
+
+    any_changes = False
     for watch_dir in DeploymentConfig.WATCHED_DIRS:
         rel_path = watch_dir.relative_to(DeploymentConfig.REPO_PATH)
-        
+
         rc, stdout, _ = run_command(
             f"git diff --name-only {old_commit}..{new_commit} -- {rel_path}",
             cwd=DeploymentConfig.REPO_PATH,
-            check=False
+            check=False,
         )
-        
+
         if stdout.strip():
             ColorLogger.success(f"Changes detected in {rel_path}")
             print(stdout)
-            return True
-    
-    ColorLogger.warning("No changes in watched directories")
-    return False
+            any_changes = True
 
-
-def check_for_changes() -> bool:
-    """Check if there are changes in watched directories since last commit"""
-    ColorLogger.step(2, "Checking for changes in watched directories")
-    
-    # Get the last 2 commits to check changes between them
-    rc, stdout, _ = run_command(
-        "git log -2 --pretty=format:%H",
-        cwd=DeploymentConfig.REPO_PATH
-    )
-    
-    commits = stdout.strip().split('\n')
-    if len(commits) < 2:
-        ColorLogger.warning("Less than 2 commits, checking HEAD changes")
-        new_commit = commits[0] if commits else "HEAD"
-        old_commit = "HEAD~1"
-    else:
-        new_commit = commits[0]
-        old_commit = commits[1]
-    
-    for watch_dir in DeploymentConfig.WATCHED_DIRS:
-        rel_path = watch_dir.relative_to(DeploymentConfig.REPO_PATH)
-        
-        rc, stdout, _ = run_command(
-            f"git diff --name-only {old_commit}..{new_commit} -- {rel_path}",
-            cwd=DeploymentConfig.REPO_PATH,
-            check=False
-        )
-        
-        if stdout.strip():
-            ColorLogger.success(f"Changes detected in {rel_path}")
-            print(stdout)
-            return True
-    
-    return False
+    if not any_changes:
+        ColorLogger.warning("No changes in watched directories")
+    return any_changes
 
 
 def build_tools():
@@ -332,7 +878,7 @@ def define_ddisk_pool():
         f"NumVDisksPerFailDomain: 1 RealmLevelBegin: 10 RealmLevelEnd: 10 "
         f"DomainLevelBegin: 10 DomainLevelEnd: 40 }} "
         f"PDiskFilter {{ Property {{ Type: SSD }} }} "
-        f"NumDDiskGroups: 32 }} }}'"
+        f"NumDDiskGroups: 16 }} }}'"
     )
     
     run_command(cmd, interactive=True)
@@ -387,6 +933,8 @@ def create_partitions():
         )
         
         run_command(cmd, interactive=True)
+
+        time.sleep(5)
     
     ColorLogger.success(f"Created {len(disk_ids)} partitions")
 
@@ -479,7 +1027,8 @@ def start_qemu_on_all_hosts():
 def run_fio_in_qemu_parallel(qemu_info: Dict[str, List[Tuple[str, str, int]]], 
                              test_name: str, rw: str, bs: str, runtime: int,
                              iodepth: int = 32, rwmixread: int = None, 
-                             numjobs: int = 1, description: str = "") -> bool:
+                             numjobs: int = 1, description: str = "",
+                             annotator: Optional[UnifiedAgentAnnotator] = None) -> Dict:
     """Run FIO test inside all QEMU instances in parallel
     
     Args:
@@ -494,7 +1043,24 @@ def run_fio_in_qemu_parallel(qemu_info: Dict[str, List[Tuple[str, str, int]]],
         description: Human-readable description
     """
     ColorLogger.info(f"Running FIO test in parallel: {description or test_name}")
-    
+
+    # Short mode description for UA annotations.
+    mode_desc = FIO_MODE_DESCRIPTIONS.get(test_name, f"{bs} {rw}")
+
+    if annotator is not None:
+        annotator.annotate(
+            f"Start fio run: {mode_desc}",
+            level="INFO",
+            extra_labels={
+                "event": "fio_start",
+                "fio_test": test_name,
+                "fio_mode": mode_desc,
+                "fio_rw": rw,
+                "fio_bs": bs,
+                "fio_runtime_s": str(runtime),
+            },
+        )
+
     qemu_user = "qemu"
     device = "/dev/vdb"
     
@@ -555,17 +1121,23 @@ def run_fio_in_qemu_parallel(qemu_info: Dict[str, List[Tuple[str, str, int]]],
     # Analyze results
     successes = 0
     failures = 0
-    
+    per_instance = {}  # instance -> {"ok": bool, "p90": ..., "iops": ...}
+
     print("\n" + "="*80)
     print(f"FIO Results: {description or test_name}")
     print(f"Total instances: {len(results)}")
     print("="*80)
-    
+
     for instance, (rc, stdout, stderr) in results.items():
+        p90 = parse_fio_clat_p90(stdout) if rc == 0 else None
+        iops = parse_fio_iops(stdout) if rc == 0 else None
+        per_instance[instance] = {"ok": rc == 0, "p90": p90, "iops": iops}
         if rc == 0:
             successes += 1
-            ColorLogger.success(f"  {instance}: PASS")
-            # Optionally print summary from output
+            ColorLogger.success(
+                f"  {instance}: PASS  clat p90 = {format_latency(p90)}  "
+                f"iops = {format_iops(iops)}"
+            )
             for line in stdout.split('\n'):
                 if 'IOPS=' in line or 'BW=' in line or 'lat' in line:
                     print(f"    {instance}: {line.strip()}")
@@ -574,12 +1146,62 @@ def run_fio_in_qemu_parallel(qemu_info: Dict[str, List[Tuple[str, str, int]]],
             ColorLogger.error(f"  {instance}: FAIL")
             if stderr:
                 print(f"    Error: {stderr[:200]}")
-    
+
+    # Aggregate p90 across instances (max; any slow disk matters).
+    all_p90 = [info["p90"] for info in per_instance.values() if info["p90"] is not None]
+    agg_p90 = None
+    if all_p90:
+        def to_usec(v):
+            val, unit = v
+            return {"nsec": val / 1000.0, "usec": float(val), "msec": val * 1000.0}[unit]
+        agg_p90 = max(all_p90, key=to_usec)
+
+    # Aggregate IOPS across instances (sum -- that's the cluster throughput).
+    all_iops = [info["iops"] for info in per_instance.values() if info["iops"] is not None]
+    total_iops: Optional[float] = sum(all_iops) if all_iops else None
+
     print("="*80)
-    print(f"Summary: {successes} passed, {failures} failed")
+    print(f"Summary: {successes} passed, {failures} failed  "
+          f"| aggregate clat p90 = {format_latency(agg_p90)}"
+          f"  | total iops = {format_iops(total_iops)}")
     print("="*80 + "\n")
-    
-    return failures == 0
+
+    if annotator is not None:
+        ann_text = (
+            f"Finish fio run: {mode_desc}  "
+            f"p90={format_latency(agg_p90)}  iops={format_iops(total_iops)}  "
+            f"ok={successes}/{successes + failures}"
+        )
+        annotator.annotate(
+            ann_text,
+            level="INFO" if failures == 0 else "WARN",
+            extra_labels={
+                "event": "fio_finish",
+                "fio_test": test_name,
+                "fio_mode": mode_desc,
+                "fio_rw": rw,
+                "fio_bs": bs,
+                "fio_successes": str(successes),
+                "fio_failures": str(failures),
+                "fio_p90_value": str(agg_p90[0]) if agg_p90 else "",
+                "fio_p90_unit": agg_p90[1] if agg_p90 else "",
+                "fio_iops_total": f"{total_iops:.0f}" if total_iops is not None else "",
+            },
+        )
+
+    return {
+        "test_name": test_name,
+        "description": description or test_name,
+        "mode_desc": mode_desc,
+        "rw": rw,
+        "bs": bs,
+        "runtime": runtime,
+        "successes": successes,
+        "failures": failures,
+        "per_instance": per_instance,
+        "aggregate_p90": agg_p90,
+        "total_iops": total_iops,
+    }
 
 
 # Removed run_fio_warmup - using run_fio_in_qemu_parallel instead
@@ -782,13 +1404,56 @@ def start_fio_long_term_background(qemu_info: Dict[str, List[Tuple[str, str, int
         return False
 
 
+def build_report(new_head: str, commit_subject: str,
+                 fio_results: List[Dict], log_path: Optional[Path]) -> str:
+    """Build a human-readable text report for email + log."""
+    lines = []
+    lines.append("YDB NBS Cluster Deployment Report")
+    lines.append("=" * 80)
+    lines.append(f"Host          : {socket.gethostname()}")
+    lines.append(f"Finished      : {datetime.datetime.now().isoformat()}")
+    lines.append(f"Commit        : {new_head}")
+    lines.append(f"Commit subject: {commit_subject}")
+    if log_path:
+        lines.append(f"Log file      : {log_path}")
+    lines.append("")
+    lines.append("FIO results (clat p90 and total IOPS across all disks):")
+    lines.append("-" * 88)
+    lines.append(f"{'Test':<28} {'rw':<10} {'bs':<6} {'runtime':>8}  "
+                 f"{'ok/total':>10}  {'p90 clat':>12}  {'total iops':>12}")
+    lines.append("-" * 88)
+    for r in fio_results:
+        total = r["successes"] + r["failures"]
+        lines.append(
+            f"{r['description'][:28]:<28} {r['rw']:<10} {r['bs']:<6} "
+            f"{r['runtime']:>8}  {r['successes']:>4}/{total:<4}   "
+            f"{format_latency(r['aggregate_p90']):>12}  "
+            f"{format_iops(r.get('total_iops')):>12}"
+        )
+    lines.append("-" * 88)
+    lines.append("")
+    lines.append("Per-instance p90 clat / iops:")
+    for r in fio_results:
+        lines.append(f"  [{r['description']}]")
+        for instance, info in r["per_instance"].items():
+            status = "OK  " if info["ok"] else "FAIL"
+            lines.append(
+                f"    {status} {instance:<40} "
+                f"p90={format_latency(info['p90'])}  "
+                f"iops={format_iops(info.get('iops'))}"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main():
     """Main deployment workflow"""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description='Automated deployment script for YDB NBS cluster testing (multi-host)',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
     parser.add_argument(
         '--force', '-f',
@@ -801,67 +1466,132 @@ def main():
         default=8,
         help='Number of disks to create (default: 8)'
     )
+    parser.add_argument(
+        '--log-dir',
+        type=str,
+        default=None,
+        help='Directory where a timestamped deploy log will be written. '
+             'A log file is created ONLY when the script actually deploys '
+             'to the cluster and runs fio (not when it exits early).'
+    )
+    parser.add_argument(
+        '--no-email',
+        action='store_true',
+        help='Do not send email report at the end.'
+    )
     args = parser.parse_args()
-    
-    # Set number of disks from args
+
+    # --- Single-instance lock: exit 0 if another run is in progress. -------
+    lock = SingleInstanceLock()
+    lock.acquire_or_exit()
+
+    # --- 3h wall-clock timeout. --------------------------------------------
+    _install_timeout(SCRIPT_TIMEOUT_SECONDS)
+
     DeploymentConfig.NUM_DISKS = args.num_disks
-    
+
+    deploy_logger = DeploymentLogger(Path(args.log_dir) if args.log_dir else None)
+
     print(f"\n{ColorLogger.BOLD}{'='*80}{ColorLogger.ENDC}")
     print(f"{ColorLogger.BOLD}YDB NBS Cluster Deployment Script (Multi-Host){ColorLogger.ENDC}")
     print(f"{ColorLogger.BOLD}{'='*80}{ColorLogger.ENDC}\n")
-    
+
+    fio_results: List[Dict] = []
+    new_head = "unknown"
+    commit_subject = ""
+    annotator: Optional[UnifiedAgentAnnotator] = None
+
     try:
-        # Load cluster configuration
         ColorLogger.info("Loading cluster configuration")
         DeploymentConfig.load_cluster_config()
         ColorLogger.info(f"Number of disks to create: {DeploymentConfig.NUM_DISKS}")
         print()
-        
-        # Step 1-3: Git operations (skip if --force)
+
+        # Construct UA annotator. UA is reached via SSH to host 0 + the
+        # ua_annotate.py helper we scp to it. Disabled if there's no uri
+        # in the cluster config or no hosts to reach.
+        ua_remote_host = DeploymentConfig.HOSTS[0] if DeploymentConfig.HOSTS else None
+        annotator = UnifiedAgentAnnotator(
+            uri=DeploymentConfig.UA_URI,
+            cluster_name=DeploymentConfig.CLUSTER_NAME,
+            log_name=DeploymentConfig.UA_LOG_NAME,
+            remote_host=ua_remote_host,
+            remote_user=DeploymentConfig.REMOTE_USER,
+        )
+        if annotator.enabled:
+            if not deploy_ua_helper(ua_remote_host):
+                ColorLogger.warning(
+                    "Disabling UA annotations because ua_annotate.py could not "
+                    "be copied to the remote host."
+                )
+                annotator.enabled = False
+
+        # --- Step 1-3: git pull + change detection across ALL pulled commits
         if args.force:
             ColorLogger.warning("--force flag set, skipping git pull and change detection")
+            _, new_head, _ = run_command(
+                "git rev-parse HEAD", cwd=DeploymentConfig.REPO_PATH
+            )
+            new_head = new_head.strip()
         else:
-            if not git_pull():
-                ColorLogger.warning("No new changes pulled, checking existing changes...")
-            
-            if not check_for_changes():
-                ColorLogger.warning("No changes in watched directories. Exiting.")
+            old_head, new_head = git_pull()
+            if old_head == new_head:
+                ColorLogger.warning("No new commits pulled. Exiting (no log written).")
+                sys.exit(0)
+            if not check_changes_in_directories(old_head, new_head):
+                ColorLogger.warning(
+                    "No changes in watched directories across pulled commits. "
+                    "Exiting (no log written)."
+                )
                 ColorLogger.info("Use --force to deploy anyway")
                 sys.exit(0)
-        
-        # Step 4-8: Build and deploy on build VM
+
+        commit_subject = get_commit_subject(new_head)
+
+        # From this point we are definitely deploying: open the log file.
+        log_path = deploy_logger.activate(new_head, commit_subject)
+        if log_path is not None:
+            ColorLogger.info(f"Deployment log: {log_path}")
+        else:
+            ColorLogger.warning("--log-dir not provided; no deploy log will be written")
+
+        ColorLogger.info(f"Running commit: {new_head}  ({commit_subject})")
+
+        # Annotate: start of deploy (carries commit being deployed).
+        annotator.annotate(
+            f"Start deploy of commit {new_head[:12]} ({commit_subject})",
+            level="INFO",
+            extra_labels={
+                "event": "deploy_start",
+                "commit": new_head,
+                "commit_short": new_head[:12],
+                "commit_subject": commit_subject,
+            },
+        )
+
+        # --- Step 4-8: Build and deploy on build VM ------------------------
         build_tools()
         deploy_cluster()
         define_ddisk_pool()
-        
-        # Step 9: Remove old sockets on all hosts
+
         remove_all_sockets()
-        
-        # Step 10: Create partitions
         create_partitions()
-        
-        # Step 11: Start QEMU on all hosts
+
         qemu_info = start_qemu_on_all_hosts()
-        
         if not qemu_info:
             ColorLogger.error("No QEMU instances started!")
             sys.exit(1)
-        
-        # Give QEMU some time to fully boot before running FIO
-        ColorLogger.info("Waiting additional time for QEMU VMs to stabilize...")
-        time.sleep(10)
-        
-        # Step 12: Run FIO tests in all QEMU VMs (in parallel, not client-server)
+
         ColorLogger.step(12, "Running FIO tests in all QEMU VMs")
-        
-        # Warmup
+
         ColorLogger.info("Running warmup test...")
-        run_fio_in_qemu_parallel(
+        warmup = run_fio_in_qemu_parallel(
             qemu_info, "warmup", "write", "1m", 300,
-            description="Warmup: Sequential write 1MB blocks"
+            description="Warmup: Sequential write 1MB blocks",
+            annotator=annotator,
         )
-        
-        # Performance test suite
+        fio_results.append(warmup)
+
         tests = [
             ("4k_randwrite", "randwrite", "4k", 60, None, "4K random write"),
             ("4k_randread", "randread", "4k", 60, None, "4K random read"),
@@ -870,35 +1600,105 @@ def main():
             ("1m_seqread", "read", "1m", 60, None, "1MB sequential read"),
             ("1m_mixed", "readwrite", "1m", 60, 50, "1MB sequential mixed (50/50)"),
         ]
-        
         for test_name, rw, bs, runtime, rwmixread, desc in tests:
-            run_fio_in_qemu_parallel(qemu_info, test_name, rw, bs, runtime, rwmixread=rwmixread, description=desc)
+            r = run_fio_in_qemu_parallel(
+                qemu_info, test_name, rw, bs, runtime,
+                rwmixread=rwmixread, description=desc,
+                annotator=annotator,
+            )
+            fio_results.append(r)
             time.sleep(2)
-        
-        # Step 13: Long-term background tests on all QEMU instances
+
         start_fio_long_term_background(qemu_info)
-        
+
         print(f"\n{ColorLogger.BOLD}{'='*80}{ColorLogger.ENDC}")
         ColorLogger.success("Deployment and testing completed successfully!")
         print(f"{ColorLogger.BOLD}{'='*80}{ColorLogger.ENDC}\n")
-        
-        # Summary
+
         total_qemu = sum(len(pids) for pids in qemu_info.values())
         ColorLogger.info(f"QEMU instances running: {total_qemu}")
         for host, pids in qemu_info.items():
             if pids:
-                disks = ", ".join([disk_id for disk_id, _ in pids])
+                disks = ", ".join([disk_id for disk_id, _, _ in pids])
                 ColorLogger.info(f"  {host}: {disks}")
-        ColorLogger.info(f"Long-term FIO tests running on all QEMU instances - check ~/fio_longterm_diskX.log")
-        
+        ColorLogger.info("Long-term FIO tests running on all QEMU instances - check ~/fio_longterm_diskX.log")
+
+        # --- Report + email ------------------------------------------------
+        report = build_report(new_head, commit_subject, fio_results, deploy_logger.log_path)
+        print("\n" + report)
+
+        # Annotate: finish of deploy (carries commit + summary).
+        if annotator is not None:
+            annotator.annotate(
+                f"Finish deploy of commit {new_head[:12]} OK",
+                level="INFO",
+                extra_labels={
+                    "event": "deploy_finish",
+                    "status": "ok",
+                    "commit": new_head,
+                    "commit_short": new_head[:12],
+                    "fio_tests": str(len(fio_results)),
+                },
+            )
+
+        if not args.no_email:
+            subject = f"[deploy_on_cluster] {socket.gethostname()} commit={new_head[:8]} OK"
+            send_email_report(subject, report)
+
+    except ScriptTimeout as e:
+        ColorLogger.error(f"TIMEOUT: {e}")
+        partial = build_report(new_head, commit_subject, fio_results, deploy_logger.log_path)
+        print(partial)
+        if annotator is not None:
+            annotator.annotate(
+                f"Finish deploy of commit {new_head[:12]} TIMEOUT: {e}",
+                level="ERROR",
+                extra_labels={
+                    "event": "deploy_finish",
+                    "status": "timeout",
+                    "commit": new_head,
+                    "commit_short": new_head[:12],
+                },
+            )
+        if not args.no_email and deploy_logger.activated:
+            send_email_report(
+                f"[deploy_on_cluster] {socket.gethostname()} commit={new_head[:8]} TIMEOUT",
+                "Script exceeded 3h timeout.\n\n" + partial,
+            )
+        sys.exit(2)
     except KeyboardInterrupt:
         ColorLogger.warning("\nDeployment interrupted by user")
         sys.exit(130)
+    except SystemExit:
+        raise
     except Exception as e:
         ColorLogger.error(f"Deployment failed: {e}")
         import traceback
         traceback.print_exc()
+        if annotator is not None:
+            annotator.annotate(
+                f"Finish deploy of commit {new_head[:12]} FAILED: {e}",
+                level="ERROR",
+                extra_labels={
+                    "event": "deploy_finish",
+                    "status": "failed",
+                    "commit": new_head,
+                    "commit_short": new_head[:12],
+                    "error": str(e)[:500],
+                },
+            )
+        if not args.no_email and deploy_logger.activated:
+            partial = build_report(new_head, commit_subject, fio_results, deploy_logger.log_path)
+            send_email_report(
+                f"[deploy_on_cluster] {socket.gethostname()} commit={new_head[:8]} FAILED",
+                f"Deployment failed: {e}\n\n{traceback.format_exc()}\n\n{partial}",
+            )
         sys.exit(1)
+    finally:
+        signal.alarm(0)
+        if annotator is not None:
+            annotator.close()
+        deploy_logger.close()
 
 
 if __name__ == "__main__":
