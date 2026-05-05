@@ -10,10 +10,10 @@ Cron setup (run every 5 minutes):
 
 Add the line (adjust paths and log dir as needed):
 
-    */5 * * * * /usr/bin/flock -n /tmp/deploy_on_cluster.lock \
-        /home/vazhenin-mv/ydbwork/ydb/ydb/core/nbs/scripts/deploy_on_cluster.py \
-        --log-dir /home/vazhenin-mv/deploy_logs \
-        >> /home/vazhenin-mv/deploy_cron.log 2>&1
+    */5 * * * * /usr/bin/flock -n /tmp/deploy_cron.lock \
+        python3 ~/deploy_on_cluster.py \
+        --log-dir ~/deploy_logs \
+        >> ~/deploy_cron.log 2>&1
 
 Notes:
   * `flock -n` makes cron skip the tick if a previous run is still active.
@@ -24,8 +24,6 @@ Notes:
     there are no relevant changes).
   * The whole run is capped at 3 hours; if it doesn't finish in time the
     script exits with a non-zero code.
-  * After a successful run, a report with p90 clat latencies per fio test
-    is emailed to vazhenin-mv@yandex-team.ru.
 """
 
 import subprocess
@@ -47,7 +45,6 @@ from typing import List, Tuple, Dict, Optional, Any
 
 SCRIPT_TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours
 LOCK_FILE_PATH = "/tmp/deploy_on_cluster.lock"
-REPORT_EMAIL = "vazhenin-mv@yandex-team.ru"
 
 
 class DeploymentConfig:
@@ -61,20 +58,19 @@ class DeploymentConfig:
         REPO_PATH / "ydb" / "core" / "blobstorage" / "ddisk",
     ]
     
-    # Cluster configuration file
-    CLUSTER_CONFIG_PATH = Path.home() / ".mnc" / "load_cluster.yaml"
+    # Cluster configuration file (set via command line)
+    CLUSTER_CONFIG_PATH: Optional[Path] = None
     
     # Will be populated from cluster config
     HOSTS: List[str] = []
     GRPC_SERVER = ""  # First host will be used
     GRPC_PORT = 2135
     
-    REMOTE_USER = os.environ.get("USER", "vazhenin-mv")
-    
     # Disk configuration
     NUM_DISKS = 8  # Number of disks to create (disk1-diskN)
     DISK_PREFIX = "disk"
     DISK_POOL = "ddp1"
+    BLOCKS_COUNT = 1048576  # Default: 4GB (4G * 262144 blocks/G)
 
     # Unified-Agent / log_config fields populated from cluster config YAML.
     # Mirrors LogConfig in AppConfig proto used by ydbd.
@@ -406,11 +402,10 @@ def deploy_ua_helper(host: str) -> bool:
         ColorLogger.warning(f"UA helper not found: {local_path}")
         return False
 
-    target = host if "@" in host else f"{DeploymentConfig.REMOTE_USER}@{host}"
     scp_cmd = (
         f"scp -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
         f"-o LogLevel=ERROR "
-        f"{shlex.quote(str(local_path))} {target}:{UA_HELPER_REMOTE_PATH}"
+        f"{shlex.quote(str(local_path))} {host}:{UA_HELPER_REMOTE_PATH}"
     )
     rc, _, stderr = run_command(scp_cmd, check=False)
     if rc != 0:
@@ -443,7 +438,6 @@ class UnifiedAgentAnnotator:
         uri: str,
         cluster_name: str,
         remote_host: Optional[str],
-        remote_user: Optional[str] = None,
         remote_helper_path: str = UA_HELPER_REMOTE_PATH,
         log_name: str = "ydb",
         tenant: str = "",
@@ -461,7 +455,6 @@ class UnifiedAgentAnnotator:
         self.service = service
 
         self.remote_host = remote_host
-        self.remote_user = remote_user or DeploymentConfig.REMOTE_USER
         self.remote_helper_path = remote_helper_path
         self.ssh_timeout = ssh_timeout
 
@@ -528,8 +521,7 @@ class UnifiedAgentAnnotator:
     # -- public api -------------------------------------------------------
 
     def _ssh_target(self) -> str:
-        host = self.remote_host or ""
-        return host if "@" in host else f"{self.remote_user}@{host}"
+        return self.remote_host or ""
 
     def annotate(
         self,
@@ -595,57 +587,6 @@ FIO_MODE_DESCRIPTIONS = {
     "1m_seqread":    "1m sequential read",
     "1m_mixed":      "1m sequential mixed (50/50)",
 }
-
-
-def send_email_report(subject: str, body: str, to_addr: str = REPORT_EMAIL) -> bool:
-    """Send an email report using the local `mail`/`sendmail` if available."""
-    # Try `mail` first (bsd-mailx/mailutils compatible).
-    for mailer in ("mail", "mailx", "/usr/bin/mail"):
-        mailer_bin = mailer if os.path.isabs(mailer) else _which(mailer)
-        if not mailer_bin:
-            continue
-        try:
-            proc = subprocess.run(
-                [mailer_bin, "-s", subject, to_addr],
-                input=body,
-                text=True,
-                capture_output=True,
-                timeout=60,
-            )
-            if proc.returncode == 0:
-                ColorLogger.success(f"Report emailed to {to_addr} via {mailer_bin}")
-                return True
-            else:
-                ColorLogger.warning(
-                    f"{mailer_bin} returned {proc.returncode}: {proc.stderr.strip()}"
-                )
-        except Exception as e:
-            ColorLogger.warning(f"Failed to send via {mailer_bin}: {e}")
-
-    # Fallback: /usr/sbin/sendmail -t
-    sendmail = "/usr/sbin/sendmail"
-    if os.path.exists(sendmail):
-        try:
-            msg = (
-                f"To: {to_addr}\n"
-                f"Subject: {subject}\n"
-                f"Content-Type: text/plain; charset=UTF-8\n"
-                f"\n"
-                f"{body}\n"
-            )
-            proc = subprocess.run(
-                [sendmail, "-t"], input=msg, text=True,
-                capture_output=True, timeout=60,
-            )
-            if proc.returncode == 0:
-                ColorLogger.success(f"Report emailed to {to_addr} via sendmail")
-                return True
-            ColorLogger.warning(f"sendmail rc={proc.returncode}: {proc.stderr.strip()}")
-        except Exception as e:
-            ColorLogger.warning(f"Failed to send via sendmail: {e}")
-
-    ColorLogger.error("No working mail transport found; report NOT sent")
-    return False
 
 
 def _which(binary: str) -> Optional[str]:
@@ -716,10 +657,6 @@ def run_remote_command(cmd: str, host: str = None, check: bool = True) -> Tuple[
     """Run command on remote host via SSH"""
     if host is None:
         host = DeploymentConfig.HOSTS[0] if DeploymentConfig.HOSTS else "localhost"
-    
-    # Add user if not already in host string
-    if '@' not in host:
-        host = f"{DeploymentConfig.REMOTE_USER}@{host}"
     
     ssh_cmd = f'ssh {host} "{cmd}"'
     return run_command(ssh_cmd, check=check)
@@ -856,9 +793,9 @@ def deploy_cluster():
     ColorLogger.step(7, "Deploying cluster configuration")
     
     run_command(
-        "configure/configure fullcycle promote "
-        "--config_path ~/.mnc/load_cluster.yaml "
-        "--deploy_flags do_strip",
+        f"configure/configure fullcycle promote "
+        f"--config_path {shlex.quote(str(DeploymentConfig.CLUSTER_CONFIG_PATH))} "
+        f"--deploy_flags do_strip",
         cwd=DeploymentConfig.MULTINODE_PATH,
         interactive=True  # configure uses rich/interactive output
     )
@@ -928,7 +865,7 @@ def create_partitions():
             f"--pool {DeploymentConfig.DISK_POOL} "
             f"--type=ssd "
             f"--block-size 4096 "
-            f"--blocks-count 1048576 "
+            f"--blocks-count {DeploymentConfig.BLOCKS_COUNT} "
             f"--disk-id {disk_id}"
         )
         
@@ -1023,11 +960,14 @@ def start_qemu_on_all_hosts():
     
     return all_qemu_info
 
-
+#
+# Run fio in parallel for all user disks in qemu instances
+#
 def run_fio_in_qemu_parallel(qemu_info: Dict[str, List[Tuple[str, str, int]]], 
                              test_name: str, rw: str, bs: str, runtime: int,
                              iodepth: int = 32, rwmixread: int = None, 
                              numjobs: int = 1, description: str = "",
+                             verify: bool = False,
                              annotator: Optional[UnifiedAgentAnnotator] = None) -> Dict:
     """Run FIO test inside all QEMU instances in parallel
     
@@ -1035,12 +975,15 @@ def run_fio_in_qemu_parallel(qemu_info: Dict[str, List[Tuple[str, str, int]]],
         qemu_info: Dict mapping host to list of (disk_id, qemu_pid, ssh_port) tuples
         test_name: Name for the test
         rw: IO pattern (read, write, randread, randwrite, randrw, readwrite)
-        bs: Block size (e.g., '4k', '1m')
+        bs: Block size (e.g., '4k', '1m'). When verify=True, this value is used as
+            the --bssplit argument instead of --bs.
         runtime: Runtime in seconds
         iodepth: IO depth
         rwmixread: Percentage of reads in mixed workload
         numjobs: Number of parallel jobs
         description: Human-readable description
+        verify: If True, enable fio data verification. The bs argument is passed via
+            --bssplit and the standard verify flags are appended.
     """
     ColorLogger.info(f"Running FIO test in parallel: {description or test_name}")
 
@@ -1071,17 +1014,34 @@ def run_fio_in_qemu_parallel(qemu_info: Dict[str, List[Tuple[str, str, int]]],
         "--ioengine=libaio",
         f"--iodepth={iodepth}",
         f"--rw={rw}",
-        f"--bs={bs}",
+    ]
+
+    if verify:
+        fio_cmd_parts.append(f"--bssplit={bs}")
+    else:
+        fio_cmd_parts.append(f"--bs={bs}")
+
+    fio_cmd_parts += [
         "--direct=1",
         f"--numjobs={numjobs}",
         "--group_reporting",
         f"--filename={device}",
         f"--runtime={runtime}",
-        "--time_based=1"
+        "--time_based=1",
     ]
-    
+
     if rwmixread is not None:
         fio_cmd_parts.append(f"--rwmixread={rwmixread}")
+
+    if verify:
+        fio_cmd_parts += [
+            "--verify_fatal=1",
+            "--verify_dump=1",
+            "--verify_async=2",
+            "--do_verify=1",
+            "--verify=sha1",
+            "--verify_backlog=500",
+        ]
     
     fio_cmd = " ".join(fio_cmd_parts)
     
@@ -1202,12 +1162,6 @@ def run_fio_in_qemu_parallel(qemu_info: Dict[str, List[Tuple[str, str, int]]],
         "aggregate_p90": agg_p90,
         "total_iops": total_iops,
     }
-
-
-# Removed run_fio_warmup - using run_fio_in_qemu_parallel instead
-
-
-# Removed run_fio_test_suite - using run_fio_in_qemu_parallel instead
 
 
 def setup_fio_client_server(qemu_info: Dict[str, List[Tuple[str, str]]]):
@@ -1467,17 +1421,24 @@ def main():
         help='Number of disks to create (default: 8)'
     )
     parser.add_argument(
+        '--config-path',
+        type=str,
+        default='~/.mnc/load_cluster.yaml',
+        help='Path to cluster configuration YAML file (default: ~/.mnc/load_cluster.yaml)'
+    )
+    parser.add_argument(
+        '--size',
+        type=str,
+        default='4G',
+        help='Disk size in format XG (e.g., 4G, 8G, 16G). Default: 4G'
+    )
+    parser.add_argument(
         '--log-dir',
         type=str,
         default=None,
         help='Directory where a timestamped deploy log will be written. '
              'A log file is created ONLY when the script actually deploys '
              'to the cluster and runs fio (not when it exits early).'
-    )
-    parser.add_argument(
-        '--no-email',
-        action='store_true',
-        help='Do not send email report at the end.'
     )
     args = parser.parse_args()
 
@@ -1488,7 +1449,22 @@ def main():
     # --- 3h wall-clock timeout. --------------------------------------------
     _install_timeout(SCRIPT_TIMEOUT_SECONDS)
 
+    # Parse disk size and convert to blocks
+    size_str = args.size.upper()
+    if not size_str.endswith('G'):
+        ColorLogger.error(f"Invalid size format: {args.size}. Must be in format XG (e.g., 4G, 8G)")
+        sys.exit(1)
+    try:
+        size_gb = int(size_str[:-1])
+        # Convert GB to blocks (4KB block size)
+        # size_gb * 1024 * 1024 * 1024 / 4096 = size_gb * 262144
+        DeploymentConfig.BLOCKS_COUNT = size_gb * 262144
+    except ValueError:
+        ColorLogger.error(f"Invalid size format: {args.size}. Must be in format XG (e.g., 4G, 8G)")
+        sys.exit(1)
+
     DeploymentConfig.NUM_DISKS = args.num_disks
+    DeploymentConfig.CLUSTER_CONFIG_PATH = Path(args.config_path).expanduser()
 
     deploy_logger = DeploymentLogger(Path(args.log_dir) if args.log_dir else None)
 
@@ -1505,6 +1481,7 @@ def main():
         ColorLogger.info("Loading cluster configuration")
         DeploymentConfig.load_cluster_config()
         ColorLogger.info(f"Number of disks to create: {DeploymentConfig.NUM_DISKS}")
+        ColorLogger.info(f"Disk size: {args.size} ({DeploymentConfig.BLOCKS_COUNT} blocks)")
         print()
 
         # Construct UA annotator. UA is reached via SSH to host 0 + the
@@ -1516,7 +1493,6 @@ def main():
             cluster_name=DeploymentConfig.CLUSTER_NAME,
             log_name=DeploymentConfig.UA_LOG_NAME,
             remote_host=ua_remote_host,
-            remote_user=DeploymentConfig.REMOTE_USER,
         )
         if annotator.enabled:
             if not deploy_ua_helper(ua_remote_host):
@@ -1586,24 +1562,29 @@ def main():
 
         ColorLogger.info("Running warmup test...")
         warmup = run_fio_in_qemu_parallel(
-            qemu_info, "warmup", "write", "1m", 300,
+            qemu_info, "warmup", "write", "1m", 60,
             description="Warmup: Sequential write 1MB blocks",
             annotator=annotator,
         )
         fio_results.append(warmup)
 
         tests = [
-            ("4k_randwrite", "randwrite", "4k", 60, None, "4K random write"),
-            ("4k_randread", "randread", "4k", 60, None, "4K random read"),
-            ("4k_mixed", "randrw", "4k", 60, 50, "4K random mixed (50/50)"),
-            ("1m_seqwrite", "write", "1m", 60, None, "1MB sequential write"),
-            ("1m_seqread", "read", "1m", 60, None, "1MB sequential read"),
-            ("1m_mixed", "readwrite", "1m", 60, 50, "1MB sequential mixed (50/50)"),
+            ("4k_randwrite", "randwrite", "4k", 60, None, "4K random write", 32, False),
+            ("4k_randread", "randread", "4k", 60, None, "4K random read", 32, False),
+            ("4k_mixed", "randrw", "4k", 60, 50, "4K random mixed (50/50)", 32, False),
+            ("1m_seqwrite", "write", "1m", 60, None, "1MB sequential write", 32, False),
+            ("1m_seqread", "read", "1m", 60, None, "1MB sequential read", 32, False),
+            ("1m_mixed", "readwrite", "1m", 60, 50, "1MB sequential mixed (50/50)", 32, False),
+            ("mixed_bssplit_verify", "randwrite", "4k/20:8k/20:64k/50:1M/10", 60, None,
+                "Mixed bssplit random write with verify (sha1)", 32, True),
+#           ("4k_randwrite_iodepth64", "randwrite", "4k", 60, None, "4K random write iodepth 64", 64, False),
+#           ("4k_randwrite_iodepth96", "randwrite", "4k", 60, None, "4K random write iodepth 96", 96, False),
         ]
-        for test_name, rw, bs, runtime, rwmixread, desc in tests:
+        for test_name, rw, bs, runtime, rwmixread, desc, iodepth, verify in tests:
             r = run_fio_in_qemu_parallel(
                 qemu_info, test_name, rw, bs, runtime,
-                rwmixread=rwmixread, description=desc,
+                rwmixread=rwmixread, description=desc, iodepth=iodepth,
+                verify=verify,
                 annotator=annotator,
             )
             fio_results.append(r)
@@ -1623,7 +1604,7 @@ def main():
                 ColorLogger.info(f"  {host}: {disks}")
         ColorLogger.info("Long-term FIO tests running on all QEMU instances - check ~/fio_longterm_diskX.log")
 
-        # --- Report + email ------------------------------------------------
+        # --- Report ------------------------------------------------
         report = build_report(new_head, commit_subject, fio_results, deploy_logger.log_path)
         print("\n" + report)
 
@@ -1641,10 +1622,6 @@ def main():
                 },
             )
 
-        if not args.no_email:
-            subject = f"[deploy_on_cluster] {socket.gethostname()} commit={new_head[:8]} OK"
-            send_email_report(subject, report)
-
     except ScriptTimeout as e:
         ColorLogger.error(f"TIMEOUT: {e}")
         partial = build_report(new_head, commit_subject, fio_results, deploy_logger.log_path)
@@ -1659,11 +1636,6 @@ def main():
                     "commit": new_head,
                     "commit_short": new_head[:12],
                 },
-            )
-        if not args.no_email and deploy_logger.activated:
-            send_email_report(
-                f"[deploy_on_cluster] {socket.gethostname()} commit={new_head[:8]} TIMEOUT",
-                "Script exceeded 3h timeout.\n\n" + partial,
             )
         sys.exit(2)
     except KeyboardInterrupt:
@@ -1686,12 +1658,6 @@ def main():
                     "commit_short": new_head[:12],
                     "error": str(e)[:500],
                 },
-            )
-        if not args.no_email and deploy_logger.activated:
-            partial = build_report(new_head, commit_subject, fio_results, deploy_logger.log_path)
-            send_email_report(
-                f"[deploy_on_cluster] {socket.gethostname()} commit={new_head[:8]} FAILED",
-                f"Deployment failed: {e}\n\n{traceback.format_exc()}\n\n{partial}",
             )
         sys.exit(1)
     finally:
